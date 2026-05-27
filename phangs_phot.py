@@ -6,6 +6,7 @@
 import glob 
 import numpy as np
 import matplotlib.pyplot as plt
+from sys import exit
 
 import astropy.units as u
 from astropy import wcs
@@ -19,7 +20,8 @@ from astropy.coordinates import SkyCoord, match_coordinates_sky
 
 # Photutils imports
 from photutils.background import Background2D, MedianBackground, SExtractorBackground
-from photutils.detection import IRAFStarFinder, DAOStarFinder
+from photutils.detection import IRAFStarFinder, DAOStarFinder, find_peaks
+from photutils.centroids import centroid_quadratic
 from photutils.aperture import CircularAperture, CircularAnnulus, ApertureStats
 from photutils.aperture import aperture_photometry
 
@@ -28,20 +30,21 @@ from photutils.aperture import aperture_photometry
 # Conversions and file management
 # ------------------------------------------------
 def convert_aperture_sum_Jy_per_sr_to_abmag(aperture_sum_jy_sr, header):
-     '''Convert aperture sum in Jy/sr to AB magnitudes.
+     """Convert aperture sum in Jy/sr to AB magnitudes.
      Args:
           aperture_sum_jy_sr: aperture sum in Jy/sr or MJy/sr
           header: FITS header containing WCS information to get pixel area in steradians
                   and BUNIT for checking units of the input aperture sum.
      Returns:
-          AB magnitudes'''
+          AB magnitudes"""
      
      # Check that the input is in Jy/sr
      if header.get('BUNIT', '').lower() in ['mjysr', 'mjy/sr', 'mj/steradian']:
+          # If header is in MJy/sr, then convert to Jy/sr before calculating magnitude
           print(f"Warning: BUNIT in header is {header.get('BUNIT', 'unknown')}, but expected Jy/sr. Applying conversion to MJy/sr.")
           aperture_sum_jy_sr = np.array(aperture_sum_jy_sr) * 1e6
      elif not header.get('BUNIT', '').lower() in ['jy/sr', 'jy/steradian']:
-          raise ValueError("Input aperture sum must be in Jy/sr for conversion to AB magnitudes.")
+          raise ValueError("Input aperture sum must be in Jy/sr or MJy/sr for conversion to AB magnitudes.")
     
      # Get pixel area in steradians from header
      pix_area_sr = get_pixarea_in_sr(header)
@@ -66,12 +69,12 @@ def get_pixarea_in_sr(header):
     
     # If keyword is not found, then we can try to compute it from CDELT or CD matrix
     elif ('CDELT1' in header) and ('CDELT2' in header):
-        print("Warning: PIXAR_SR keyword not found in header. Attempting to compute pixel area from WCS information.")
+        print("Warning: PIXAR_SR keyword not found in header. Computing pixel area from WCS information.")
         area_deg2 = np.abs(float(header['CDELT1']) * float(header['CDELT2']))
         if np.isfinite(area_deg2) and (area_deg2 > 0):
             return float((area_deg2 * u.deg**2).to(u.sr).value)
     elif 'CD1_1' in header:
-        print("Warning: PIXAR_SR keyword not found in header. Attempting to compute pixel area from WCS information.")
+        print("Warning: PIXAR_SR keyword not found in header. Computing pixel area from WCS information.")
         cd = np.array([[float(header['CD1_1']), float(header['CD1_2'])],
                         [float(header['CD2_1']), float(header['CD2_2'])]])
         area_deg2 = np.abs(np.linalg.det(cd))
@@ -166,7 +169,7 @@ def subtract_bkg(img, box_size=(50,50), filter_size=(3, 3), bkg_estimator=Median
      sigma_clip = SigmaClip(sigma=3.0)
 
      if coverage_mask is None:
-          print(f"creating coverage mask")
+          print(f"Creating coverage mask")
           coverage_mask = (~np.isfinite(img)) | (img == 0)
 
      bkg = Background2D(
@@ -196,7 +199,7 @@ def subtract_bkg(img, box_size=(50,50), filter_size=(3, 3), bkg_estimator=Median
 # ------------------------------------------------
 # Source finding (using IRAF, DAO in progress)
 # ------------------------------------------------
-def run_source_finder(img, header, rms, finder='iraf', snr_threshold=3.0, fwhm=2.0,
+def run_source_finder(img, header, rms, finder='iraf', snr_threshold=3.0, fwhm=2.0, box_size=(50,50),
      roundlo=-0.5, roundhi=0.5, sharplo=0.2, sharphi=1.0, brightest=50000):
      """Find sources in the image using IRAFStarFinder.
      Args:
@@ -225,6 +228,8 @@ def run_source_finder(img, header, rms, finder='iraf', snr_threshold=3.0, fwhm=2
                sharphi=sharphi,
                brightest=brightest,
           )
+          # Run the source finder
+          sources = source_finder(img)
      elif finder == 'dao':
           # DAO can also use elliptical apertures.
           source_finder = DAOStarFinder(threshold=ths,
@@ -235,22 +240,25 @@ def run_source_finder(img, header, rms, finder='iraf', snr_threshold=3.0, fwhm=2
                sharphi=sharphi,
                brightest=brightest,
           )
-     # elif finder == 'peaks':
-     #      # find_peaks looks for local maxima above a specified threshold, 
-     #      # and can use a box size to define the neighborhood for peak detection.
-     #      # Requires a bit of extra work to get results in the same format as IRAFStarFinder/DAOStarFinder, 
-     #      # and it doesn't calculate sharpness or roundness.
-     #      # TODO: Add function converting find_peaks output to a table with xcentroid, ycentroid, flux, etc.
-     #      source_finder = find_peaks(img, 
-     #           threshold=ths, 
-     #           box_size=fwhm*2,
-     #           centroid_func=centroid_quadratic,
-     #      )
-     else:
+          # Run the source finder
+          sources = source_finder(img)
+     if finder == 'peaks':
+          # find_peaks looks for local maxima above a specified threshold.
+          # Requires a bit of extra work to get results in the same format as IRAFStarFinder/DAOStarFinder, 
+          # and it doesn't calculate sharpness or roundness.
+          # TODO: Add function converting find_peaks output to a table with xcentroid, ycentroid, flux, etc.
+          # Check if box size is even. If it is, add one to each of the values
+          if box_size[0] % 2 == 0:
+               box_size = (box_size[0] + 1, box_size[1] + 1)
+          sources = find_peaks(img, 
+               threshold=ths, 
+               box_size=box_size,
+               centroid_func=centroid_quadratic,
+          )
+     elif finder != 'iraf' and finder != 'dao' and finder != 'peaks':
           raise ValueError(f"Starfinder {finder} not recognized. Currently only 'iraf' supported.")
 
-     # Run the source finder
-     sources = source_finder(img)
+     
      print(f"Found {len(sources)} sources")
      print(sources.colnames)
      return sources
@@ -470,7 +478,13 @@ filter_fwhm = {
 
 # Path to my directory and the folder that I want outputs to be saved to
 root_dir = "/nexus/posix0/MIA-astro-env/eschinner/reho/"
-outdir = root_dir + "centres/catalogs_using_v2p0"
+outdir = root_dir + "centres/catalogs_using_v2p0/"
+
+# Check that outdir exists
+import os
+if not os.path.exists(outdir):
+     raise FileNotFoundError(f"Output directory {outdir} does not exist. Please create it before running the code.")
+     exit()
 
 # Path to the shared directory with all of the JWST data
 # jwst_dir = "/nexus/posix0/MIA-astro-env/eschinner/shared/PHANGS/JWST/v4p1/4793/nircam/reprocess/v4p1/"
@@ -483,7 +497,7 @@ gal = 'ngc2997'
 inst = 'nircam'
 level = 'anchoring'
 mosaic_ext = 'i2d_anchor.fits'
-band = 'f150w'
+band = 'f212n'
 sci_ext = 0 # Which header extension we want the data from
 # ------------------------------------
 
@@ -572,6 +586,7 @@ sources = run_source_finder(
     fwhm=fwhm,
     brightest=nsources
 )
+# exit()
 
 # **** Alternatively, load in a catalog computed by another method here ****
 
@@ -602,11 +617,12 @@ apertures, catalog = compute_photometry(
     sources=sources, 
     r_opt=r_opt, 
     brightest=brightest_phot, 
-    write=False, 
+    write=True, 
     outdir=outdir
 )
 
 print(f"Photometry complete. Catalog has {len(catalog)} sources.")
+exit()
 
 
 # ---------------------------------------------------------------------------------------------------------
