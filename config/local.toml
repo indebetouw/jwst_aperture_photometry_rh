@@ -1,2 +1,2 @@
-# Paths
-wdir = '/nexus/posix0/MIA-astro-env/eschinner/shared/PHANGS/JWST'
+jwst_dir = '/nexus/posix0/MIA-astro-env/eschinner/shared/PHANGS/JWST/'
+out_dir = '/nexus/posix0/MIA-astro-env/eschinner/reho/centres/jwst_aperture_photometry/catalogs/'

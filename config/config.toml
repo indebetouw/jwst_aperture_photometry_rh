@@ -1,10 +1,10 @@
 # Directories will be set in a locals file, not the config
 
 steps = ["source_find", "photometry"]
-targets = ["ngc1097", "ngc1512"]
+targets = ["ngc1097"]
 product = ["anchor"]
-bands = ["F200W"]
-version = 'v4p1'
+bands = ["F150W", "F444W"]
+version = "v4p1"
 ptype = ["images"]
 projects = ["4793"]
 
@@ -22,6 +22,7 @@ coverage_mask = false
 box_size = 50
 filter_size = 3
 bkg_estimator = 'SExtractorBackground()'
+plot = false
 
 [parameters.source_find]
 
@@ -39,9 +40,9 @@ nsources = 50000
 
 use_brightest = false
 aperture_radius = 3
-phot_method = 'exact'
 radius_sky_in = 5
 radius_sky_out = 10
-sigma_to_cip = 3.0
+sigma = 3.0
 maxiters = 5
-write = false
+write = true
+overwrite = false
