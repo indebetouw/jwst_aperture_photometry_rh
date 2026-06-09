@@ -78,6 +78,15 @@ def get_path_to_file(wdir, version, project, galaxy, ptype):
      if os.path.exists(path):
           print(f"Found file for {galaxy} {filter} in {path}")
      else:
+          # look for plausible files in the directory and print a warning if we find any, but raise an error if we don't find any
+          plausible_files = []
+          for f in os.walk(wdir + version + "/"):
+               if galaxy.lower() in f[0].lower() and ptype.lower() in f[0].lower() and filter.lower() in f[0].lower():
+                    plausible_files.append(f[0])
+
+          if len(plausible_files) > 0:
+               print(f"Warning: No file found for {galaxy} {filter} in release {path}, so using this plausible file: {plausible_files[0]}.")
+
           raise FileNotFoundError(f"No file found for {galaxy} {filter} in {path}. Please check the path and file naming conventions.")
      return path
 
@@ -104,7 +113,7 @@ def convert_aperture_sum_Jy_per_sr_to_abmag(aperture_sum_jy_sr, header):
      pix_area_sr = get_pixarea_in_sr(header)
      fnu_jy = np.array(aperture_sum_jy_sr) * pix_area_sr
      fnu_jy = np.where(fnu_jy > 0, fnu_jy, np.nan)
-     # Converrt to magnitudes
+     # Convert to magnitudes
      abmag = -2.5 * np.log10(fnu_jy / 3631.0)
      return abmag
 
@@ -207,15 +216,15 @@ def open_jwst(path, gal, dir, band, mosaic_ext="*anchor*.fits", get_coverage=Tru
 # ------------------------------------------------
 def subtract_bkg(img, 
           sigma=3.0, 
-          box_size=50, 
-          filter_size=3, 
+          box_size_pix=50, 
+          filter_size_pix=3, 
           bkg_estimator=MedianBackground(), 
           coverage_mask=False):
      """Estimate and subtract background from image using Background2D.
      Args:
           img: 2D array of image data
-          box_size: size of boxes for background estimation (in pixels)
-          filter_size: size of median filter to apply to background (in pixels)
+          box_size_pix: size of boxes for background estimation (in pixels)
+          filter_size_pix: size of median filter to apply to background (in pixels)
           bkg_estimator: background estimator to use (default is MedianBackground())
           coverage_mask: boolean array where True indicates pixels to exclude from background estimation 
                          (e.g., due to low coverage or bad data). If False, no mask is applied.
@@ -226,19 +235,21 @@ def subtract_bkg(img,
      
      # estimate background
      # TODO: need to include valid mask based on weight image or other metric
-     sigma_clip = SigmaClip(sigma=sigma)
-     filter_size = (filter_size, filter_size)
-     box_size = (box_size, box_size)
+     sigma_clip = SigmaClip(sigma=sigma, maxiters=5)
+     filter_size_pix = (filter_size_pix, filter_size_pix)
+     box_size_pix = (box_size_pix, box_size_pix)
      bkg_estimator = eval(bkg_estimator) if isinstance(bkg_estimator, str) else bkg_estimator
 
+    
      if coverage_mask is False:
           print(f"Creating coverage mask")
           coverage_mask = (~np.isfinite(img)) | (img == 0)
 
+     # note: photutils<3.0 used edge_method='pad' by default, but photutils>=3.0 does not have this option and instead pads with fill_value=0.0 by default.
      bkg = Background2D(
           img,
-          box_size=box_size,
-          filter_size=filter_size,
+          box_size=box_size_pix,
+          filter_size=filter_size_pix,
           sigma_clip=sigma_clip,
           bkg_estimator=bkg_estimator,
           coverage_mask=coverage_mask,
@@ -262,7 +273,7 @@ def subtract_bkg(img,
 # ------------------------------------------------
 # Source finding (using IRAF, DAO in progress)
 # ------------------------------------------------
-def run_source_finder(img, header, rms, finder='iraf', snr_threshold=3.0, fwhm=2.0, box_size=(50,50),
+def run_source_finder(img, header, rms, finder='iraf', snr_threshold=3.0, fwhm=2.0, box_size_pix=(50,50),
      roundlo=-0.5, roundhi=0.5, sharplo=0.2, sharphi=1.0, nsources=10000):
      """Find sources in the image using IRAFStarFinder.
      Args:
@@ -274,7 +285,7 @@ def run_source_finder(img, header, rms, finder='iraf', snr_threshold=3.0, fwhm=2
           fwhm: FWHM of the PSF in pixels (used for source detection)
           roundlo, roundhi: roundness limits for source selection
           sharplo, sharphi: sharpness limits for source selection
-          brightest: if not None, only return this many brightest sources in the catalog
+          nsources: if not None, only return this many brightest sources in the catalog
      Returns:
           sources: Table of detected sources with columns xcentroid, ycentroid, flux, sharpness, roundness, mag, peak, etc."""
      # Run the source finder
@@ -310,16 +321,22 @@ def run_source_finder(img, header, rms, finder='iraf', snr_threshold=3.0, fwhm=2
           # Requires a bit of extra work to get results in the same format as IRAFStarFinder/DAOStarFinder, 
           # and it doesn't calculate sharpness or roundness.
           # TODO: Add function converting find_peaks output to a table with xcentroid, ycentroid, flux, etc.
+
+          # JR estimated a threshold from photutils with detect_threshold, which adds the background to a 
+          # threshold map.  Instead, here we assume the background has already been subtracted and use a flat ths.
+
+          # TODO: reconcile JR box_size_pix=3 with RH 50 
+
           # Check if box size is even. If it is, add one to each of the values
           if box_size[0] % 2 == 0:
                box_size = (box_size[0] + 1, box_size[1] + 1)
           sources = find_peaks(img, 
                threshold=ths, 
-               box_size=box_size,
+               box_size_pix=box_size_pix,
                centroid_func=centroid_quadratic,
           )
      elif finder != 'iraf' and finder != 'dao' and finder != 'peaks':
-          raise ValueError(f"Starfinder {finder} not recognized. Currently only 'iraf' supported.")
+          raise ValueError(f"Starfinder {finder} not recognized. Currently only 'iraf' and 'peaks' are supported.")
 
      
      print(f"Found {len(sources)} sources")
@@ -583,7 +600,7 @@ def do_photometry(
      ):
      """Main function to run the photometry steps for each galaxy and filter.
      Args:
-          steps: list of steps to run (e.g., ['bkg_subtract', 'source_find', 'r_opt', 'photometry'])
+          steps: list of steps to run (e.g., ['bkg_subtract', 'subtract_bkg', 'source_find', 'r_opt', 'photometry'])
           targets: list of galaxy names to process
           use_filter_fwhm: this will eventually go into the config
           conf: dictionary of parameters from the config file."""
@@ -602,10 +619,25 @@ def do_photometry(
                )
 
                # Subtract background 
-               img_sub, bkg_mean, bkg_rms, bkg_background = subtract_bkg(
-                    img=img, 
-                    **conf['parameters']['bkg_subtract'],
-               )
+               if 'subtract_bkg' in steps:
+                    if 'box_size_pix' not in conf['parameters']['bkg_subtract']:
+                         # Convert box size from pc to pixels using the pixel scale from the header
+                         pix_scale = get_pixarea_in_sr(header) ** 0.5 * (180/np.pi) * 3600  # arcsec/pixel
+                         box_size_pc = conf['parameters']['bkg_subtract']['box_size_pc']
+                         box_size_pix = int(box_size_pc / (pix_scale * conf['parameters']['bkg_subtract']['dist_Mpc'] * 1e6 ))
+                         conf['parameters']['bkg_subtract']['box_size_pix'] = box_size_pix
+
+                    if 'filter_size_pix' not in conf['parameters']['bkg_subtract']:
+                         # Convert filter size from pc to pixels using the pixel scale from the header
+                         pix_scale = get_pixarea_in_sr(header) ** 0.5 * (180/np.pi) * 3600  # arcsec/pixel
+                         filter_size_pc = conf['parameters']['bkg_subtract']['filter_size_pc']
+                         filter_size_pix = int(filter_size_pc / (pix_scale * conf['parameters']['bkg_subtract']['dist_Mpc'] * 1e6 ))
+                         conf['parameters']['bkg_subtract']['filter_size_pix'] = filter_size_pix
+
+                    img_sub, bkg_mean, bkg_rms, bkg_background = subtract_bkg(
+                         img=img, 
+                         **conf['parameters']['bkg_subtract'],
+                    )
 
                if 'source_find' in steps:
                     # Get sources using the source finder

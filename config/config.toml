@@ -19,8 +19,9 @@ plot = true
 
 sigma = 3.0
 coverage_mask = false
-box_size = 50
-filter_size = 3
+# background parameters can be specified in _pix or in _pc;  if both are present, _pix takes precedence
+box_size_pc = 85
+filter_size_pc = 15
 bkg_estimator = 'SExtractorBackground()'
 
 [parameters.source_find]
