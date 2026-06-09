@@ -1,2 +1,3 @@
 # Paths
-wdir = '/Users/ri3e/cv/galaxies/jwst_reduction/v4p1/ic5332/F335M/lv3/'
+jwst_dir = '/Users/ri3e/cv/galaxies/jwst_reduction/'
+out_dir = '/Users/ri3e/cv/galaxies/jwst_reduction/phot/'

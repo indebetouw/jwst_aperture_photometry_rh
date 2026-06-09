@@ -1,11 +1,11 @@
 # Directories will be set in a locals file, not the config
 
-steps = ["source_find", "photometry"]
-targets = ["ngc1097", "ngc1512"]
-product = ["anchor"]
-bands = ["F200W"]
+steps = ["source_find", "subtract_bkg", "aperture_photometry"]
+targets = ["ic5332"]
+product = 'i2d'
+bands = ["F335M"]
 version = 'v4p1'
-ptype = ["images"]
+ptype = [""]
 projects = ["4793"]
 
 [parameters.r_opt]
@@ -23,10 +23,13 @@ coverage_mask = false
 box_size_pc = 85
 filter_size_pc = 15
 bkg_estimator = 'SExtractorBackground()'
+sigma_to_clip_bkg = 3.0
+maxiters_for_bkg_clip = 5
+dist_Mpc = 10.0     # This really needs to be read from somewhere else.
 
 [parameters.source_find]
 
-finder = 'iraf'
+finder = 'peaks'
 snr_threshold = 3.0
 fwhm = 2.0
 roundlo = -0.5
@@ -43,6 +46,7 @@ aperture_radius = 3
 phot_method = 'exact'
 radius_sky_in = 5
 radius_sky_out = 10
-sigma_to_cip = 3.0
-maxiters = 5
-write = false
+sigma_to_clip_bkg = 3.0
+maxiters_for_bkg_clip = 5
+write = true
+cat_filetype = "csv"    # csv, fits, or other type that astropy table recognizes
