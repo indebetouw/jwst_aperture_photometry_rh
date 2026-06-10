@@ -36,17 +36,19 @@ roundlo = -0.5
 roundhi = 0.5
 sharplo = 0.2
 sharphi = 1.0
-nsources = 50000
+nsources = 100000
 
+[parameters.apcorr]
+
+eefraction = 0.80
 
 [parameters.photometry]
 
 use_brightest = false
-aperture_radius = 3
-phot_method = 'exact'
 radius_sky_in = 5
 radius_sky_out = 10
 sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
 write = true
+overwrite = false
 cat_filetype = "csv"    # csv, fits, or other type that astropy table recognizes

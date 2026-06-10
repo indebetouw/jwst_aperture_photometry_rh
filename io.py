@@ -1,6 +1,9 @@
 import numpy as np
 from astropy.io import fits
 import glob
+from astropy.table import Table, hstack
+from astropy import units as u
+from scipy.spatial import cKDTree
 
 
 
@@ -109,3 +112,32 @@ def open_jwst(path, gal, dir, band, level, mosaic_ext="*i2d_anchor.fits", get_co
         coverage_mask = None
 
     return img, err, snr_map, coverage_mask, header
+
+
+def match(
+    catalog1, 
+    catalog2, 
+    npix=2, 
+):
+    
+    coords2 = np.array([catalog2['xcenter'], catalog2['ycenter']]).T
+    coords1 = np.array([catalog1['xcenter'], catalog1['ycenter']]).T
+    # Build a KD-tree for the first catalog
+    tree = cKDTree(coords1)
+
+    # Find matches within npix pixels
+    # pixel_scale = 1#0.031
+    max_distance = npix  # or e.g. 1.0 pixel if you want 1 pixel tolerance
+
+    distances, indices = tree.query(coords2, k=1, distance_upper_bound=max_distance)
+
+    # Create mask for valid matches (finite distance = match found)
+    match_mask = np.isfinite(distances)
+
+    # Build matched catalog
+    matched1 = catalog1[match_mask]
+    matched2 = catalog2[indices[match_mask]]
+
+    # Optionally combine columns from both catalogs
+    matched_cat = hstack([matched1, matched2])
+    return matched_cat
