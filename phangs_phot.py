@@ -9,8 +9,6 @@ import matplotlib.pyplot as plt
 import tomllib
 import os
 from sys import exit
-# import from qa_plots.py
-from qa_plots import plot_cmd
 from scipy.spatial import cKDTree
 
 import astropy.units as u
@@ -34,7 +32,7 @@ from photutils.aperture import aperture_photometry
 # ------------------------------------------------
 
 config_file = 'config/config.toml'     # Photometry parameters
-local_file = 'config/local.toml'        # Paths to directories
+local_file = 'config/local.toml'       # Paths to directories
 
 def load_config(config_path: str) -> dict:
     with open(config_path, "rb") as f:
@@ -53,15 +51,12 @@ product = conf['product']
 version = conf['version']
 ptype = conf['ptype']
 
-# Number of galaxies to run for
-# TODO: if this is going into pjpost, then this will come from the argument 
-# TODO: parser?
+# Number of targets to process
 num_targets = len(targets)
 
 finder_params = conf['parameters']['source_find']
 phot_params = conf['parameters']['photometry']
 
-# exit()
 
 # ------------------------------------------------
 # Conversions and file management
@@ -209,8 +204,7 @@ def match(
     catalog1, 
     catalog2, 
     npix=2, 
-    keys=['catalog1', 'catalog2']
-):
+    keys=['catalog1', 'catalog2']):
     
     coords2 = np.array([catalog2['xcenter'], catalog2['ycenter']]).T
     coords1 = np.array([catalog1['xcenter'], catalog1['ycenter']]).T
@@ -286,6 +280,9 @@ def subtract_bkg(img,
      print(f"Mean background: {bkg_mean}")
      print(f"Background rms: {bkg_rms}")
      print(f"Subtracting background...")
+     
+
+     # threshold_img = snr_threshold * bkg.background_rms
      img_sub = img - bkg.background
      print(f"Background subtraction complete.")
 
@@ -310,7 +307,7 @@ def subtract_bkg(img,
                im = a.images[0]
                plt.colorbar(im, ax=a, pad=0.01, fraction=0.05)
 
-     return img_sub, bkg_mean, bkg_rms, bkg.background
+     return img_sub, bkg_mean, bkg_rms, bkg
 
 
 # ------------------------------------------------
@@ -318,9 +315,8 @@ def subtract_bkg(img,
 # ------------------------------------------------
 def run_source_finder(img, 
           header, 
-          bkg_mean,
           rms, 
-          snr_map,
+          bkg,
           finder='iraf', 
           snr_threshold=3.0, 
           fwhm=2.0, 
@@ -343,43 +339,40 @@ def run_source_finder(img,
           sharplo, sharphi: sharpness limits for source selection
           brightest: if not None, only return this many brightest sources in the catalog
      Returns:
-          sources: Table of detected sources with columns xcentroid, ycentroid, flux, sharpness, roundness, mag, peak, etc."""
+          sources: Table of detected sources with columns x_centroid, y_centroid, flux, sharpness, roundness, mag, peak, etc."""
      # Run the source finder
      print(f"Running source finder: {finder}")
-     # ths = snr_threshold * rms
-     print("Image shape:", img.shape)
-     print("SNR map shape:", snr_map.shape)
-     ths = snr_threshold * snr_map
+     
+     # Get the threshold image from the background calculation
+     ths = snr_threshold * bkg.background_rms
+
+     # IRAFStarFinder 
      if finder == 'iraf':
-          # IRAF always uses circular Gaussian kernels and calculates object's centroid, roundness,
-          # and sharpness using imagemoments. 
           source_finder = IRAFStarFinder(threshold=ths,
                fwhm=fwhm,
-               roundlo=roundlo,
-               roundhi=roundhi,
-               sharplo=sharplo,
-               sharphi=sharphi,
-               brightest=nsources,
+               roundness_range=(roundlo, roundhi),
+               sharpness_range=(sharplo, sharphi),
+               n_brightest=nsources,
           )
           # Run the source finder
           sources = source_finder(img)
+
+     # DAOStarFinder (can use elliptical apertures)
      elif finder == 'dao':
-          # DAO can also use elliptical apertures.
           source_finder = DAOStarFinder(threshold=ths,
                fwhm=fwhm,
-               roundlo=roundlo,
-               roundhi=roundhi,
-               sharplo=sharplo,
-               sharphi=sharphi,
-               brightest=nsources,
+               roundness_range=(roundlo, roundhi),
+               sharpness_range=(sharplo, sharphi),
+               n_brightest=nsources,
           )
           # Run the source finder
           sources = source_finder(img)
+
      if finder == 'peaks':
           # find_peaks looks for local maxima above a specified threshold.
           # Requires a bit of extra work to get results in the same format as IRAFStarFinder/DAOStarFinder, 
           # and it doesn't calculate sharpness or roundness.
-          # TODO: Add function converting find_peaks output to a table with xcentroid, ycentroid, flux, etc.
+          # TODO: Add function converting find_peaks output to a table with x_centroid, y_centroid, flux, etc.
           # Check if box size is even. If it is, add one to each of the values
           if box_size[0] % 2 == 0:
                box_size = (box_size[0] + 1, box_size[1] + 1)
@@ -415,7 +408,7 @@ def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, plot=
      Args:
           data: 2D array of image data (background-subtracted)
           sources: Table of sources from source finder 
-                   (must contain xcentroid, ycentroid, flux)
+                   (must contain x_centroid, y_centroid, flux)
           max_r: maximum aperture radius to test (in pixels)
           brightest: if not None, only use this many brightest sources to compute curve of growth
           frac: fraction of total flux to use as criterion for optimal radius 
@@ -431,7 +424,7 @@ def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, plot=
           print(f"Using only {len(sources)} sources.")
 
      print("Doing aperture photometry...")
-     positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
+     positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
      radii = np.arange(1, max_r)
 
      # Define in and outer annuli for local background estimation
@@ -485,7 +478,7 @@ def compute_photometry(data,
           sources, 
           gal, 
           band,
-          aperture_radius=10, 
+          radius=10, 
           radius_sky_in=12, 
           radius_sky_out=18, 
           use_brightest=False, 
@@ -493,6 +486,7 @@ def compute_photometry(data,
           sigma=3.0,
           write=False, 
           overwrite=False,
+          apcorr=True, 
           outdir='./'):
      """Compute aperture photometry for sources and return catalog with RA, Dec, magnitudes, etc.
      
@@ -500,7 +494,7 @@ def compute_photometry(data,
           data: 2D array of image data (background-subtracted)
           header: FITS header of the image
           sources: Table of sources from source finder 
-                   (must contain xcentroid, ycentroid, flux, sharpness, roundness, mag, peak)
+                   (must contain x_centroid, y_centroid, flux, sharpness, roundness, mag, peak)
           aperture_radius: radius of circular aperture to use for photometry (in pixels)
           radius_sky_in: inner radius of the sky annulus (in pixels)
           radius_sky_out: outer radius of the sky annulus (in pixels)
@@ -517,27 +511,29 @@ def compute_photometry(data,
           sources = sources[np.argsort(sources['flux'])[-use_brightest:]]
           print(f"using only {len(sources)} sources")
 
+     if apcorr:
+          # Get aperture correction parameters from CRDS file
+          radius, radius_sky_in, radius_sky_out, apcorr = get_apcorr_params(crds_dir, band, **conf['parameters']['apcorr'])
+          print(f"Using aperture correction factor of {apcorr} for radius {radius} pixels.")
+
      # Do aperture photometry
      print(f"Doing aperture photometry...")
-     positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
-     apertures = CircularAperture(positions, r=aperture_radius)
+     positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
+     apertures = CircularAperture(positions, r=radius)
      aper_stats = ApertureStats(data, apertures)
      phot_full = aperture_photometry(data, apertures, method='exact')
 
      # Annulus
      annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
      sigma_clip_bkg = SigmaClip(sigma=sigma, maxiters=maxiters)
-     # mask = annuli.to_mask(method='exact')
+
      # Mask the data to exclude NaNs and infs from the background estimation
      mask = ((np.isinf(data)) | (np.isnan(data)))
 
      # Background annulus stats
      bkg_stats = ApertureStats(data, annuli, sigma_clip=sigma_clip_bkg, mask=mask, sum_method='exact')
-     bkg_median = bkg_stats.median
-     bkg_median[np.isnan(bkg_median)]=0
-     area_aper = aper_stats.sum_aper_area.value
-     area_annulus = bkg_stats.sum_aper_area.value
-     total_bkg = bkg_median * area_aper
+     bkg_per_pixel = bkg_stats.sum / bkg_stats.sum_aper_area.value
+     total_bkg = bkg_per_pixel * aper_stats.sum_aper_area.value
 
      # Subtract background from aperture sum
      phot_full['aperture_sum'] = phot_full['aperture_sum'] - total_bkg
@@ -545,8 +541,7 @@ def compute_photometry(data,
      # Copy source-finder morphology columns
      phot_full['flux'] = np.asarray(sources['flux'])
      phot_full['sharpness'] = np.asarray(sources['sharpness'])
-     if 'roundness' in sources.colnames:
-          phot_full['roundness'] = np.asarray(sources['roundness'])          
+     phot_full['roundness'] = np.asarray(sources['roundness'])          
      phot_full['finder_mag'] = np.asarray(sources['mag'])
      phot_full['peak'] = np.asarray(sources['peak'])
 
@@ -560,6 +555,8 @@ def compute_photometry(data,
      phot_full['finder_flux_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(sources['flux'], header=header)
      # Aperture sum from circular aperture photometry (converted to AB magnitudes)
      phot_full['aperture_sum_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header)
+     if apcorr:
+          phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'] * apcorr, header=header)
 
      # Sort by aperture flux
      phot_full.sort("aperture_sum")
@@ -570,12 +567,52 @@ def compute_photometry(data,
 
      # Write the catalog if requested
      if write:
-          cat_name = f"{gal}_jwst_{band}_cat_snrmap.fits"
-          print(f"Writing catalog to {outdir + cat_name}")
-          phot_full.write(outdir + cat_name, overwrite=overwrite)
+          cat_name = f"{gal}_jwst_{band}_cat_testapcorr.fits"
+          print(f"Writing catalog to {out_dir + cat_name}")
+          phot_full.write(out_dir + cat_name, overwrite=overwrite)
 
      return apertures, phot_full
 
+
+def get_apcorr_params(crds_dir, band, eefraction_value=0.8):
+     """Get the aperture correction parameters from the CRDS apcorr file for a given filter and eefraction.
+     Args:
+          crds_dir: directory where the CRDS apcorr files are stored
+          band: the filter
+          eefraction_value: the fraction of total flux enclosed within the aperture.
+     Returns:
+          radius: the aperture radius in pixels
+          sky_in: the inner sky annulus radius in pixels
+          sky_out: the outer sky annulus radius in pixels
+          apcorr: the aperture correction factor
+     """
+     # Get the apcorr file using glob
+     apcorr_files = glob.glob(crds_dir + f"*apcorr*")
+     if len(apcorr_files) == 0:
+          raise FileNotFoundError(f"No apcorr files found for {band} at {crds_dir}")
+     else:
+          print(f"Found apcorr files: {apcorr_files}")
+
+     # Load the file
+     apcorr_data = fits.getdata(apcorr_files[0], ext=1)
+     print(f"APCORR data columns: {apcorr_data.columns.names}")
+
+     # Print all the unique filters in the apcorr file
+     print("Unique eefraction values:", np.unique(apcorr_data['eefraction']))
+
+     # Get data for a specific eefraction (fraction of total flux enclosed within the aperture)
+     # Valid for point sources but would underestimate the correction for extended sources.
+     row = apcorr_data[apcorr_data['eefraction'] == eefraction_value]
+
+     # Limit to a specific filter 
+     row = row[(row['filter'] == band.upper())]
+
+     # Extract values
+     radius  = row['radius'][0]   # in pixels
+     sky_in  = row['skyin'][0]    # in pixels
+     sky_out = row['skyout'][0]  # in pixels
+     apcorr  = row['apcorr'][0]   # factor to multiply enclosed flux to get total flux
+     return radius, sky_in, sky_out, apcorr
 
 # ------------------------------------------------
 # Other useful functions
@@ -626,24 +663,26 @@ filter_fwhm = {
     'F2100W': 6.127,
 }
 
-
-
 # Directories
 jwst_dir = local['jwst_dir']
 out_dir = local['out_dir']
+crds_dir = local['crds_dir']
+print(" ")
+print(f"JWST data directory: {jwst_dir}")
+print(f"Output directory: {out_dir}")
+
+# Check that input data directory exists
+if not os.path.exists(jwst_dir):
+     raise FileNotFoundError(f"JWST data directory {jwst_dir} does not exist. Please check the path in the config file.")
+     exit()
 
 # Check that outdir exists
 if not os.path.exists(out_dir):
      raise FileNotFoundError(f"Output directory {out_dir} does not exist.")
      exit()
 
-# Determine the path based on the
-path = get_path_to_file(
-     wdir=jwst_dir, 
-     version=version, 
-     project=projects[0], 
-     galaxy=targets[0],
-     ptype=ptype[0])
+
+
 
 # This is only still here temporarily
 use_filter_fwhm = True 
@@ -665,6 +704,15 @@ def do_photometry(
      catalogs = {}
 
      for gal in targets:
+          # Get the path to the data
+          path = get_path_to_file(
+               wdir=jwst_dir, 
+               version=version, 
+               project=projects[0], 
+               galaxy=targets[0],
+               ptype=ptype[0])
+
+          # Now loop through the filters for this galaxy
           for band in bands:
                print(f"Processing {gal} at {band}...")
                # Initialise catalogs dict to store the photometry results for each galaxy and filter
@@ -692,7 +740,7 @@ def do_photometry(
                     sources = run_source_finder(
                          img=img_sub, 
                          header=header,
-                         snr_map=snr_map, 
+                         bkg=bkg_background, 
                          rms=bkg_rms, 
                          **conf['parameters']['source_find'],
                     )
@@ -709,7 +757,8 @@ def do_photometry(
                          **conf['parameters']['r_opt']
                     )
                else:
-                    r_opt = conf['parameters']['photometry']['aperture_radius']
+                    r_opt = filter_fwhm[band.upper()]*2.5 if use_filter_fwhm else conf['parameters']['photometry']['aperture_radius']
+                    print(f"Using fixed aperture radius of {r_opt} pixels for photometry.")
 
                # Update the fwhm according to the filter if use_filter_fwhm is True.
                # If use_filter_fwhm is False, stay at specified value.
@@ -720,12 +769,18 @@ def do_photometry(
                     except KeyError:
                          print(f"Warning: FWHM for {band.upper()} not found in filter_fwhm dictionary. Using default FWHM of {fwhm} pixels for source detection.")
 
-               # ...or just set it to a fixed value (e.g., based on the PSF FWHM)
-               print(f"Setting aperture radius to {r_opt} pixels.")
-               # Check r_opt relative to the FWHM of the filter:
-               if r_opt > 3 * fwhm:
-                    print("Large r_opt. Using PSF FWHM rather than curve of growth for photometry.")
-                    r_opt = 2.5 * fwhm
+               # TODO: is there a better way of doing this?
+               if "apcorr" in steps:
+                    apcorr = True
+               else:
+                    apcorr = False
+
+               # # ...or just set it to a fixed value (e.g., based on the PSF FWHM)
+               # print(f"Setting aperture radius to {r_opt} pixels.")
+               # # Check r_opt relative to the FWHM of the filter:
+               # if r_opt > 3 * fwhm:
+               #      print("Large r_opt. Using PSF FWHM rather than curve of growth for photometry.")
+               #      r_opt = 2.5 * fwhm
 
                # Perform photometry with circular apertures
                if 'photometry' in steps:
@@ -735,13 +790,14 @@ def do_photometry(
                          header = header, 
                          gal = gal, 
                          band = band,
-                         # aperture_radius = r_opt,
+                         radius = r_opt,
                          sources = sources,
+                         outdir = out_dir,
+                         apcorr = apcorr,
                          **conf['parameters']['photometry']
                     )
 
                     print(f"Photometry complete. Catalog has {len(catalog)} sources.")
-
 
                     # Store the catalog in the catalogs dict
                     print(catalog)
@@ -758,25 +814,6 @@ catalogs = do_photometry(
                conf=conf
           )
 
-# Use the catalods to make a colour magnitude diagram
-print(catalogs)
-print(catalogs[targets[0]].keys())
-print(catalogs[targets[0]]['F150W'])
-print(type(catalogs[targets[0]]['F150W']))
-print(" ")
-cat_f150w = catalogs[targets[0]]['F150W']
-cat_f444w = catalogs[targets[0]]['F444W']
-
-
-cat_matched = match(cat_f150w, cat_f444w, npix=2, keys=['f150w', 'f444w'])
-mag_f150w = cat_matched['aperture_sum_abmag_f150w']
-mag_f444w = cat_matched['aperture_sum_abmag_f444w']
-fig, ax = plt.subplots(figsize=(8,5))
-ax.scatter(mag_f150w - mag_f444w, mag_f150w, s=5, alpha=0.5)
-ax.set_xlabel("F150W - F444W")
-ax.set_ylabel("F150W")
-ax.invert_yaxis()
-plt.show()
 
 exit()
 
@@ -817,7 +854,7 @@ apcorr = row['apcorr'][0]   # factor to multiply enclosed flux to get total flux
 print(f"Using aperture correction factor of {apcorr} for radius {radius} pixels and eefraction {eefraction_value}")
 
 # Create apertures for aperture correction, not using the curve of growth
-positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
+positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
 
 # Redo the aperture photometry using the radius, sky_in, and sky_out from the apcorr file
 aperture = CircularAperture(positions, r=radius)

@@ -3,7 +3,7 @@
 steps = ["source_find", "photometry"]
 targets = ["ngc1097"]
 product = ["anchor"]
-bands = ["F150W", "F444W"]
+bands = ["F150W"] #, "F164N", "F187N", "F200W", "F212N", "F277W", "F335M", "F360M", "F405N", "F444W"]
 version = "v4p1"
 ptype = ["images"]
 projects = ["4793"]
@@ -19,7 +19,7 @@ plot = true
 
 sigma = 3.0
 coverage_mask = false
-box_size = 50
+box_size = 40
 filter_size = 3
 bkg_estimator = 'SExtractorBackground()'
 plot = false
@@ -33,13 +33,15 @@ roundlo = -0.5
 roundhi = 0.5
 sharplo = 0.2
 sharphi = 1.0
-nsources = 50000
+nsources = 100000
 
+[parameters.apcorr]
+
+eefraction = 0.80
 
 [parameters.photometry]
 
 use_brightest = false
-aperture_radius = 3
 radius_sky_in = 5
 radius_sky_out = 10
 sigma = 3.0
