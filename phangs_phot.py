@@ -3,6 +3,7 @@
 # and https://www.astropy.org/ccd-reduction-and-photometry-guide/v/pdev/notebooks/photometry/00.00-Preface.html
 
 
+import fnmatch
 import glob
 import numpy as np
 import matplotlib.pyplot as plt
@@ -61,7 +62,7 @@ phot_params = conf['parameters']['photometry']
 # ------------------------------------------------
 # Conversions and file management
 # ------------------------------------------------
-def get_path_to_file(wdir, version, project, galaxy, ptype):
+def get_path_to_file(wdir, version, project, galaxy, ptype, filter):
      """Get the path to the data file based on the version, project, galaxy, product type, and filter.
      Args:
           version: version of the data (e.g., v4p1)
@@ -74,9 +75,20 @@ def get_path_to_file(wdir, version, project, galaxy, ptype):
 
      # Check that the path exists
      if os.path.exists(path):
-          print(f"Found file for {galaxy} {filter} in {path}")
+          print(f"Found directory for {galaxy} {filter} in {path}")
      else:
-          raise FileNotFoundError(f"No file found for {galaxy} {filter} in {path}. Please check the path and file naming conventions.")
+          # look for plausible files in the directory and print a warning if we find any, but raise an error if we don't find any
+          plausible_files = []
+          for root, dirnames, filenames in os.walk(wdir + version + "/"):
+               for f in fnmatch.filter(filenames, '*.fits'):
+                    if galaxy.lower() in f.lower() and ptype.lower() in f.lower() and filter.lower() in f.lower():
+                        plausible_files.append(os.path.join(root, f))
+
+          if len(plausible_files) > 0:
+               print(f"Warning: No file found for {galaxy} {filter} in release {path}, so using this plausible file: {plausible_files[0]}.")
+               path = os.path.dirname(plausible_files[0])+"/"
+          else:
+               raise FileNotFoundError(f"No file found for {galaxy} {filter} in {path}. Please check the path and file naming conventions.")
      return path
 
 
@@ -102,7 +114,7 @@ def convert_aperture_sum_Jy_per_sr_to_abmag(aperture_sum_jy_sr, header):
      pix_area_sr = get_pixarea_in_sr(header)
      fnu_jy = np.array(aperture_sum_jy_sr) * pix_area_sr
      fnu_jy = np.where(fnu_jy > 0, fnu_jy, np.nan)
-     # Converrt to magnitudes
+     # Convert to magnitudes
      abmag = -2.5 * np.log10(fnu_jy / 3631.0)
      return abmag
 
@@ -234,17 +246,19 @@ def match(
 # ------------------------------------------------
 def subtract_bkg(img, 
           sigma=3.0, 
-          box_size=50, 
-          filter_size=3, 
+          box_size_pix=50, 
+          filter_size_pix=3, 
           bkg_estimator=MedianBackground(), 
           coverage_mask=False,
-          plot=False):
-     
+          plot=False,
+          sigma_to_clip_bkg=3.0,
+          maxiters_for_bkg_clip=5,
+          **kwargs):
      """Estimate and subtract background from image using Background2D.
      Args:
           img: 2D array of image data
-          box_size: size of boxes for background estimation (in pixels)
-          filter_size: size of median filter to apply to background (in pixels)
+          box_size_pix: size of boxes for background estimation (in pixels)
+          filter_size_pix: size of median filter to apply to background (in pixels)
           bkg_estimator: background estimator to use (default is MedianBackground())
           coverage_mask: boolean array where True indicates pixels to exclude from background estimation (e.g., low coverage or bad data).
      Returns:
@@ -254,18 +268,31 @@ def subtract_bkg(img,
      
      # estimate background
      # TODO: need to include valid mask based on weight image or other metric
-     sigma_clip = SigmaClip(sigma=sigma)
-     filter_size = (filter_size, filter_size)
-     box_size = (box_size, box_size)
+     sigma_clip = SigmaClip(sigma=sigma_to_clip_bkg, maxiters=maxiters_for_bkg_clip)
+
+     # Check if box size is even. If it is, add one to each of the values
+     if type(box_size_pix) != type([]):
+          box_size_pix = (box_size_pix, box_size_pix)
+     if box_size_pix[0] % 2 == 0:
+          box_size_pix = (box_size_pix[0] + 1, box_size_pix[1] + 1)
+
+     if type(filter_size_pix) != type([]):
+          filter_size_pix = (filter_size_pix + 1, filter_size_pix + 1)
+     if filter_size_pix[0] % 2 == 0:
+          filter_size_pix = filter_size_pix + 1
+
      bkg_estimator = eval(bkg_estimator) if isinstance(bkg_estimator, str) else bkg_estimator
 
-     print(f"Creating coverage mask")
-     coverage_mask = (~np.isfinite(img)) | (img == 0)
+    
+     if coverage_mask is False:
+          print(f"Creating coverage mask")
+          coverage_mask = (~np.isfinite(img)) | (img == 0)
 
+     # note: photutils<3.0 used edge_method='pad' by default, but photutils>=3.0 does not have this option and instead pads with fill_value=0.0 by default.
      bkg = Background2D(
           img,
-          box_size=box_size,
-          filter_size=filter_size,
+          box_size=box_size_pix,
+          filter_size=filter_size_pix,
           sigma_clip=sigma_clip,
           bkg_estimator=bkg_estimator,
           coverage_mask=coverage_mask,
@@ -337,7 +364,7 @@ def run_source_finder(img,
           fwhm: FWHM of the PSF in pixels (used for source detection)
           roundlo, roundhi: roundness limits for source selection
           sharplo, sharphi: sharpness limits for source selection
-          brightest: if not None, only return this many brightest sources in the catalog
+          nsources: if not None, only return this many brightest sources in the catalog
      Returns:
           sources: Table of detected sources with columns x_centroid, y_centroid, flux, sharpness, roundness, mag, peak, etc."""
      # Run the source finder
@@ -372,18 +399,41 @@ def run_source_finder(img,
           # find_peaks looks for local maxima above a specified threshold.
           # Requires a bit of extra work to get results in the same format as IRAFStarFinder/DAOStarFinder, 
           # and it doesn't calculate sharpness or roundness.
-          # TODO: Add function converting find_peaks output to a table with x_centroid, y_centroid, flux, etc.
+          # TODO: Add function converting find_peaks output to a table with xcentroid, ycentroid, flux, etc.
+
+          # JR estimated a threshold from photutils with detect_threshold, which adds the background to a 
+          # threshold map.  Instead, here we assume the background has already been subtracted and use a flat ths.
+
+          # TODO: reconcile JR box_size_pix=3 with RH 50 
+
           # Check if box size is even. If it is, add one to each of the values
-          if box_size[0] % 2 == 0:
-               box_size = (box_size[0] + 1, box_size[1] + 1)
+          if box_size_pix[0] % 2 == 0:
+               box_size_pix = (box_size_pix[0] + 1, box_size_pix[1] + 1)
           sources = find_peaks(img, 
                threshold=ths, 
-               box_size=box_size,
+               box_size=box_size_pix,
                centroid_func=centroid_quadratic,
           )
+          # For sources where the centroid could not be determined,
+          # use the position of the peak instead.
+          #----------------------------------------
+          z=np.where(np.isnan(sources['x_centroid']))[0]
+          if len(z)>0:
+               sources['x_centroid'][z]=sources['x_peak'][z]        
+               sources['y_centroid'][z]=sources['y_peak'][z]
 
-     elif finder != 'iraf':# and finder != 'dao' and finder != 'peaks':
-          raise ValueError(f"Starfinder {finder} not recognized. Currently only 'iraf' supported.")
+          # TODO not sure if the difference betwen x_centroid and xcentroid is used outside of this function
+          sources['xcentroid']=sources['x_centroid']        
+          sources['ycentroid']=sources['y_centroid']
+
+     elif finder != 'iraf' and finder != 'dao' and finder != 'peaks':
+          raise ValueError(f"Starfinder {finder} not recognized. Currently only 'iraf' and 'peaks' are supported.")
+
+     #convert from x,y in the image to  sky coordinates   
+     #----------------------------------------
+     sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=WCS(header)) 
+     sources['ra']=sk.ra
+     sources['dec']=sk.dec
 
      print(f"Found {len(sources)} sources")
      print(sources.colnames)
@@ -482,12 +532,14 @@ def compute_photometry(data,
           radius_sky_in=12, 
           radius_sky_out=18, 
           use_brightest=False, 
-          maxiters=5,
-          sigma=3.0,
+          sigma_to_clip_bkg=3.0,
+          maxiters_for_bkg_clip=5,
+          phot_method='exact',
           write=False, 
           overwrite=False,
           apcorr=True, 
-          outdir='./'):
+          out_dir='./',
+          cat_filetype="fits"):
      """Compute aperture photometry for sources and return catalog with RA, Dec, magnitudes, etc.
      
      Args:
@@ -498,9 +550,11 @@ def compute_photometry(data,
           aperture_radius: radius of circular aperture to use for photometry (in pixels)
           radius_sky_in: inner radius of the sky annulus (in pixels)
           radius_sky_out: outer radius of the sky annulus (in pixels)
+          phot_method: method to use for photometry (e.g., 'exact', 'subpixel', etc.)
           use_brightest: if True, only use the brightest sources for photometry
-          write: if True, write catalog to outdir with name {gal}_jwst_{band}_cat.fits
-          outdir: directory to write catalog if write=True
+          write: if True, write catalog to out_dir with name {gal}_jwst_{band}_cat.fits
+          out_dir: directory to write catalog if write=True
+          cat_filetype: anything that astropy table recognizes - csv, fits
 
      Returns:
           phot_full: Table with photometry results, including RA, Dec, aperture sum, magnitudes, etc.
@@ -521,29 +575,39 @@ def compute_photometry(data,
      positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
      apertures = CircularAperture(positions, r=radius)
      aper_stats = ApertureStats(data, apertures)
-     phot_full = aperture_photometry(data, apertures, method='exact')
+     phot_full = aperture_photometry(data, apertures, method=phot_method)
 
      # Annulus
      annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
-     sigma_clip_bkg = SigmaClip(sigma=sigma, maxiters=maxiters)
-
+     sigma_clip_bkg = SigmaClip(sigma=sigma_to_clip_bkg, maxiters=maxiters_for_bkg_clip)
+     # mask = annuli.to_mask(method='exact')
      # Mask the data to exclude NaNs and infs from the background estimation
      mask = ((np.isinf(data)) | (np.isnan(data)))
 
      # Background annulus stats
-     bkg_stats = ApertureStats(data, annuli, sigma_clip=sigma_clip_bkg, mask=mask, sum_method='exact')
-     bkg_per_pixel = bkg_stats.sum / bkg_stats.sum_aper_area.value
-     total_bkg = bkg_per_pixel * aper_stats.sum_aper_area.value
+     bkg_stats = ApertureStats(data, annuli, sigma_clip=sigma_clip_bkg, mask=mask, sum_method=phot_method)
+     bkg_median = bkg_stats.median
+     bkg_median[np.isnan(bkg_median)]=0
+     area_aper = aper_stats.sum_aper_area.value
+     area_annulus = bkg_stats.sum_aper_area.value
+     total_bkg = bkg_median * area_aper
 
      # Subtract background from aperture sum
      phot_full['aperture_sum'] = phot_full['aperture_sum'] - total_bkg
 
      # Copy source-finder morphology columns
-     phot_full['flux'] = np.asarray(sources['flux'])
-     phot_full['sharpness'] = np.asarray(sources['sharpness'])
-     phot_full['roundness'] = np.asarray(sources['roundness'])          
-     phot_full['finder_mag'] = np.asarray(sources['mag'])
-     phot_full['peak'] = np.asarray(sources['peak'])
+     if 'flux' in sources.colnames:  # it won't be there for findpeaks method.  TODO could be added in find step
+          phot_full['finder_flux'] = np.asarray(sources['flux'])
+     if 'sharpness' in sources.colnames:
+          phot_full['sharpness'] = np.asarray(sources['sharpness'])
+     if 'roundness' in sources.colnames:
+          phot_full['roundness'] = np.asarray(sources['roundness'])          
+     if 'mag' in sources.colnames:
+          phot_full['finder_mag'] = np.asarray(sources['mag'])
+     if 'peak' in sources.colnames:
+          phot_full['peak'] = np.asarray(sources['peak'])
+     elif 'peak_value' in sources.colnames: 
+          phot_full['peak'] = np.asarray(sources['peak_value'])   # TODO change peakfinder output to have peak instead of peak_value
 
      # Include ra, dec
      wcs = WCS(header)
@@ -552,7 +616,8 @@ def compute_photometry(data,
      phot_full["dec"] = dec
 
      # Convert flux from the source finder in table (converted to AB magnitudes)
-     phot_full['finder_flux_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(sources['flux'], header=header)
+     if 'finder_flux' in phot_full.colnames:
+          phot_full['finder_flux_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['finder_flux'], header=header)
      # Aperture sum from circular aperture photometry (converted to AB magnitudes)
      phot_full['aperture_sum_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header)
      if apcorr:
@@ -567,7 +632,7 @@ def compute_photometry(data,
 
      # Write the catalog if requested
      if write:
-          cat_name = f"{gal}_jwst_{band}_cat_testapcorr.fits"
+          cat_name = f"{gal}_jwst_{band}_cat." + cat_filetype
           print(f"Writing catalog to {out_dir + cat_name}")
           phot_full.write(out_dir + cat_name, overwrite=overwrite)
 
@@ -676,12 +741,10 @@ if not os.path.exists(jwst_dir):
      raise FileNotFoundError(f"JWST data directory {jwst_dir} does not exist. Please check the path in the config file.")
      exit()
 
-# Check that outdir exists
+# Check that out_dir exists
 if not os.path.exists(out_dir):
      raise FileNotFoundError(f"Output directory {out_dir} does not exist.")
      exit()
-
-
 
 
 # This is only still here temporarily
@@ -695,7 +758,7 @@ def do_photometry(
      ):
      """Main function to run the photometry steps for each galaxy and filter.
      Args:
-          steps: list of steps to run (e.g., ['bkg_subtract', 'source_find', 'r_opt', 'photometry'])
+          steps: list of steps to run (e.g., ['bkg_subtract', 'subtract_bkg', 'source_find', 'r_opt', 'photometry'])
           targets: list of galaxy names to process
           use_filter_fwhm: this will eventually go into the config
           conf: dictionary of parameters from the config file."""
@@ -723,23 +786,44 @@ def do_photometry(
 
                # Open the JWST data file 
                img, err, snr_map, coverage_mask, header = open_jwst(
-                    path=path, 
-                    gal=gal, 
-                    dir=jwst_dir, 
-                    band=band
+                    mosaic_ext = conf['product'],
+                    path = path, 
+                    gal = gal, 
+                    dir = jwst_dir, 
+                    band = band
                )
 
+               # TODO get distance from the galaxy sample table intead of the config file
                # Subtract background 
-               img_sub, bkg_mean, bkg_rms, bkg_background = subtract_bkg(
-                    img=img, 
-                    **conf['parameters']['bkg_subtract'],
-               )
+               if 'subtract_bkg' in steps:
+                    if 'box_size_pix' not in conf['parameters']['bkg_subtract']:
+                         # Convert box size from pc to pixels using the pixel scale from the header
+                         pix_scale = get_pixarea_in_sr(header) ** 0.5 * (180/np.pi) * 3600  # arcsec/pixel
+                         box_size_pc = conf['parameters']['bkg_subtract']['box_size_pc']
+                         box_size_pix = int(box_size_pc * 206265 / (pix_scale * conf['parameters']['bkg_subtract']['dist_Mpc'] * 1e6 ))
+                         conf['parameters']['bkg_subtract']['box_size_pix'] = box_size_pix
+
+                    if 'filter_size_pix' not in conf['parameters']['bkg_subtract']:
+                         # Convert filter size from pc to pixels using the pixel scale from the header
+                         pix_scale = get_pixarea_in_sr(header) ** 0.5 * (180/np.pi) * 3600  # arcsec/pixel
+                         filter_size_pc = conf['parameters']['bkg_subtract']['filter_size_pc']
+                         filter_size_pix = int(filter_size_pc * 206265/ (pix_scale * conf['parameters']['bkg_subtract']['dist_Mpc'] * 1e6 ))
+                         conf['parameters']['bkg_subtract']['filter_size_pix'] = filter_size_pix
+
+                    img_sub, bkg_mean, bkg_rms, bkg_background = subtract_bkg(
+                         img=img, 
+                         **conf['parameters']['bkg_subtract'],
+                    )
 
                if 'source_find' in steps:
                     # Get sources using the source finder
+                    if 'subtract_bkg' in steps:
+                         use_image = img_sub
+                    else:
+                         use_image = img
                     sources = run_source_finder(
-                         img=img_sub, 
-                         header=header,
+                         img=use_image, 
+                         header=header, 
                          bkg=bkg_background, 
                          rms=bkg_rms, 
                          **conf['parameters']['source_find'],
@@ -792,8 +876,8 @@ def do_photometry(
                          band = band,
                          radius = r_opt,
                          sources = sources,
-                         outdir = out_dir,
                          apcorr = apcorr,
+                         out_dir = local['out_dir'],
                          **conf['parameters']['photometry']
                     )
 
