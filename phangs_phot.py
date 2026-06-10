@@ -170,6 +170,7 @@ def open_jwst(path, gal, dir, band, mosaic_ext="*anchor*.fits", get_coverage=Tru
           header: FITS header of the image data
      """
      # Load the files
+     # TODO implement better fallbacks starting with mosaic_ext (default anchored) and then falling back to i2d or types
      print(f"Searching in {path} for {band} data, with extension: {mosaic_ext}")
      #     files = glob.glob(f"{path}/{gal.lower()}*{band.lower()}*{mosaic_ext}")
      files = glob.glob(path + f"*{band.lower()}*{mosaic_ext}*")
@@ -245,7 +246,6 @@ def match(
 # Background subtraction
 # ------------------------------------------------
 def subtract_bkg(img, 
-          sigma=3.0, 
           box_size_pix=50, 
           filter_size_pix=3, 
           bkg_estimator=MedianBackground(), 
@@ -342,12 +342,11 @@ def subtract_bkg(img,
 # ------------------------------------------------
 def run_source_finder(img, 
           header, 
-          rms, 
           bkg,
           finder='iraf', 
           snr_threshold=3.0, 
           fwhm=2.0, 
-          box_size=(50,50),
+          box_size_pix=(5,5),  # TODO reconcile RH's value of 50 with JR's value of 3 here
           roundlo=-0.5, 
           roundhi=0.5, 
           sharplo=0.2, 
@@ -358,7 +357,6 @@ def run_source_finder(img,
      Args:
           img: 2D array of background-subtracted image data
           header: FITS header of the image (used for WCS and pixel scale)
-          rms: background RMS (in same units as img)
           finder: source finder to use (currently only 'iraf' supported)
           snr_threshold: signal-to-noise ratio threshold for source detection
           fwhm: FWHM of the PSF in pixels (used for source detection)
@@ -473,7 +471,7 @@ def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, plot=
           sources = sources[np.argsort(sources['flux'])[-brightest:]]
           print(f"Using only {len(sources)} sources.")
 
-     print("Doing aperture photometry...")
+     print("Calculating optimal aperture...")
      positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
      radii = np.arange(1, max_r)
 
@@ -589,7 +587,7 @@ def compute_photometry(data,
      bkg_median = bkg_stats.median
      bkg_median[np.isnan(bkg_median)]=0
      area_aper = aper_stats.sum_aper_area.value
-     area_annulus = bkg_stats.sum_aper_area.value
+     # area_annulus = bkg_stats.sum_aper_area.value
      total_bkg = bkg_median * area_aper
 
      # Subtract background from aperture sum
@@ -758,7 +756,7 @@ def do_photometry(
      ):
      """Main function to run the photometry steps for each galaxy and filter.
      Args:
-          steps: list of steps to run (e.g., ['bkg_subtract', 'subtract_bkg', 'source_find', 'r_opt', 'photometry'])
+          steps: list of steps to run (e.g., ['bkg_subtract', 'subtract_bkg', 'source_find', 'r_opt', 'aperture_photometry'])
           targets: list of galaxy names to process
           use_filter_fwhm: this will eventually go into the config
           conf: dictionary of parameters from the config file."""
@@ -773,7 +771,8 @@ def do_photometry(
                version=version, 
                project=projects[0], 
                galaxy=targets[0],
-               ptype=ptype[0])
+               ptype=ptype[0],
+               filter=conf['bands'][0])
 
           # Now loop through the filters for this galaxy
           for band in bands:
@@ -825,7 +824,6 @@ def do_photometry(
                          img=use_image, 
                          header=header, 
                          bkg=bkg_background, 
-                         rms=bkg_rms, 
                          **conf['parameters']['source_find'],
                     )
 
@@ -867,7 +865,7 @@ def do_photometry(
                #      r_opt = 2.5 * fwhm
 
                # Perform photometry with circular apertures
-               if 'photometry' in steps:
+               if 'aperture_photometry' in steps:
                     print(f"Performing photometry on {len(sources)} sources with aperture radius of {r_opt} pixels.")
                     apertures, catalog = compute_photometry(
                          data = img_sub, 

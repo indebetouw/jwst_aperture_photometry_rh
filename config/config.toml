@@ -25,7 +25,9 @@ filter_size_pc = 15
 bkg_estimator = 'SExtractorBackground()'
 sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
-dist_Mpc = 10.0     # This really needs to be read from somewhere else.
+# This really needs to be read from somewhere else.
+dist_Mpc = 10.0     
+plot = false
 
 [parameters.source_find]
 
@@ -50,5 +52,5 @@ radius_sky_out = 10
 sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
 write = true
-overwrite = false
+overwrite = true
 cat_filetype = "csv"    # csv, fits, or other type that astropy table recognizes
