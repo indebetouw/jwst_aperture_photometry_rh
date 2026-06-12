@@ -433,6 +433,12 @@ def run_source_finder(img,
      sources['ra']=sk.ra
      sources['dec']=sk.dec
 
+     #convert from x,y in the image to  sky coordinates   
+     #----------------------------------------
+     sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=WCS(header)) 
+     sources['ra']=sk.ra
+     sources['dec']=sk.dec
+
      print(f"Found {len(sources)} sources")
      print(sources.colnames)
      return sources
@@ -522,6 +528,7 @@ def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, plot=
 
 # ------- Main photometry function ------------------------------------------------ 
 def compute_photometry(data, 
+          err,
           header, 
           sources, 
           gal, 
@@ -542,6 +549,7 @@ def compute_photometry(data,
      
      Args:
           data: 2D array of image data (background-subtracted)
+          err: 2D array of error data (same shape as data)
           header: FITS header of the image
           sources: Table of sources from source finder 
                    (must contain x_centroid, y_centroid, flux, sharpness, roundness, mag, peak)
@@ -572,6 +580,7 @@ def compute_photometry(data,
      print(f"Doing aperture photometry...")
      positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
      apertures = CircularAperture(positions, r=radius)
+<<<<<<< HEAD
      aper_stats = ApertureStats(data, apertures)
      phot_full = aperture_photometry(data, apertures, method=phot_method)
 
@@ -579,16 +588,37 @@ def compute_photometry(data,
      annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
      sigma_clip_bkg = SigmaClip(sigma=sigma_to_clip_bkg, maxiters=maxiters_for_bkg_clip)
      # mask = annuli.to_mask(method='exact')
+=======
+     aper_stats = ApertureStats(data, apertures, error=err)
+     phot_full = aperture_photometry(data, apertures, error=err, method='exact')
+     aperture_mask = apertures.to_mask(method='exact')
+
+     # Annulus
+     annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
+     annulus_mask = annuli.to_mask(method='exact')
+     sigma_clip_bkg = SigmaClip(sigma=sigma, maxiters=maxiters)
+
+>>>>>>> 6b65d13 (Added aperture errors)
      # Mask the data to exclude NaNs and infs from the background estimation
      mask = ((np.isinf(data)) | (np.isnan(data)))
 
      # Background annulus stats
+<<<<<<< HEAD
      bkg_stats = ApertureStats(data, annuli, sigma_clip=sigma_clip_bkg, mask=mask, sum_method=phot_method)
      bkg_median = bkg_stats.median
      bkg_median[np.isnan(bkg_median)]=0
      area_aper = aper_stats.sum_aper_area.value
      # area_annulus = bkg_stats.sum_aper_area.value
      total_bkg = bkg_median * area_aper
+=======
+     bkg_stats = ApertureStats(data, annuli, error=err, sigma_clip=sigma_clip_bkg, mask=mask, sum_method='exact')
+     bkg_per_pixel = bkg_stats.sum / bkg_stats.sum_aper_area.value
+     total_bkg = bkg_per_pixel * aper_stats.sum_aper_area.value
+>>>>>>> 6b65d13 (Added aperture errors)
+
+     # Errors on the background estimates
+     bkg_err = bkg_stats.std * aper_stats.sum_aper_area.value
+     bkg_err_scalefactor = np.sqrt(0.5*np.pi / bkg_stats.sum_aper_area.value)  # scale factor for background error based on area of annulus and aperture
 
      # Subtract background from aperture sum
      phot_full['aperture_sum'] = phot_full['aperture_sum'] - total_bkg
@@ -620,6 +650,17 @@ def compute_photometry(data,
      phot_full['aperture_sum_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header)
      if apcorr:
           phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'] * apcorr, header=header)
+     # Add the errors
+     phot_full['bkg_err'] = np.asarray(bkg_err)
+
+     # TODO: Is there a better way to do this than a list?
+     if band.lower()=='f335m' or band.lower()=='f770w' or band.lower()=='f1000w' or band.lower()=='f1130w' or band.lower()=='f2100w':
+          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err**2)
+     elif band.lower()=='f300m' or band.lower()=='f360m' or band.lower()=='f444w':
+          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err**2 * bkg_err_scalefactor**2)
+     else:
+          print(f"Band {band} not recognized for error calculation. Setting total_aperture_sum_err to sqrt(aperture_sum_err**2 + bkg_err**2).")
+          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err**2)
 
      # Sort by aperture flux
      phot_full.sort("aperture_sum")
@@ -635,6 +676,48 @@ def compute_photometry(data,
           phot_full.write(out_dir + cat_name, overwrite=overwrite)
 
      return apertures, phot_full
+
+
+def bkg_error_quantiles(data, annulus_masks, sigma=3.0):
+     """Compute local background statistics in the annulus around each source.
+     Args:
+          data: 2D array of image data (background-subtracted)
+          annulus_masks: list of masks for each annulus (from annuli.to_mask())
+          sigma_clip: SigmaClip object for sigma clipping the background pixels (optional)
+          mask: boolean array where True indicates pixels to exclude from background estimation (e.g., low coverage or bad data)
+     Returns:
+     """
+     
+     bkg_10 = np.zeros(len(annulus_masks))
+     bkg_90 = np.zeros(len(annulus_masks))
+     bkg_10_clip = np.zeros(len(annulus_masks))
+     bkg_90_clip = np.zeros(len(annulus_masks))
+     npix_annulus = np.zeros(len(annulus_masks))
+     npix_annulus_clipped = np.zeros(len(annulus_masks))
+     sigma_clip = SigmaClip(sigma=sigma) if sigma is not None else None
+
+     for i, m in enumerate(annulus_masks):
+          annulus_data = m.multiply(data)
+
+          if annulus_data is not None:
+               # Flatten and remove zeros, NaNs, and infs
+               annulus_data_1d = annulus_data[(annulus_data != 0) & np.isfinite(annulus_data) & ~np.isnan(annulus_data)] 
+
+               if len(annulus_data_1d) > 0:
+                    annulus_data_filtered = sigma_clip(annulus_data_1d) if sigma_clip is not None else annulus_data_1d
+                    bkg_low, bkg_hi = np.quantile(annulus_data_1d, [0.1,0.9])
+                    bkg_low_clip, bkg_hi_clip = np.quantile(annulus_data_filtered, [0.1,0.9])
+                    # Update results
+                    bkg_10[i] = bkg_low
+                    bkg_90[i] = bkg_hi
+                    bkg_10_clip[i] = bkg_low_clip
+                    bkg_90_clip[i] = bkg_hi_clip
+                    npix_annulus[i] = len(annulus_data_1d)
+                    npix_annulus_clipped[i] = len(annulus_data_filtered)
+          else:
+               continue
+     return bkg_10, bkg_90, bkg_10_clip, bkg_90_clip, npix_annulus, npix_annulus_clipped
+                    
 
 
 def get_apcorr_params(crds_dir, band, eefraction_value=0.8):
@@ -869,6 +952,7 @@ def do_photometry(
                     print(f"Performing photometry on {len(sources)} sources with aperture radius of {r_opt} pixels.")
                     apertures, catalog = compute_photometry(
                          data = img_sub, 
+                         err = err,
                          header = header, 
                          gal = gal, 
                          band = band,

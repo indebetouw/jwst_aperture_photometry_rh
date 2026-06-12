@@ -52,5 +52,9 @@ radius_sky_out = 10
 sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
 write = true
+<<<<<<< HEAD
 overwrite = true
 cat_filetype = "csv"    # csv, fits, or other type that astropy table recognizes
+=======
+overwrite = true
+>>>>>>> 6b65d13 (Added aperture errors)
