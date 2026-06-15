@@ -580,41 +580,23 @@ def compute_photometry(data,
      print(f"Doing aperture photometry...")
      positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
      apertures = CircularAperture(positions, r=radius)
-<<<<<<< HEAD
-     aper_stats = ApertureStats(data, apertures)
-     phot_full = aperture_photometry(data, apertures, method=phot_method)
+     aper_stats = ApertureStats(data, apertures, error=err)
+     phot_full = aperture_photometry(data, apertures, error=err, method=phot_method)
 
      # Annulus
      annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
      sigma_clip_bkg = SigmaClip(sigma=sigma_to_clip_bkg, maxiters=maxiters_for_bkg_clip)
      # mask = annuli.to_mask(method='exact')
-=======
-     aper_stats = ApertureStats(data, apertures, error=err)
-     phot_full = aperture_photometry(data, apertures, error=err, method='exact')
-     aperture_mask = apertures.to_mask(method='exact')
-
-     # Annulus
-     annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
-     annulus_mask = annuli.to_mask(method='exact')
-     sigma_clip_bkg = SigmaClip(sigma=sigma, maxiters=maxiters)
-
->>>>>>> 6b65d13 (Added aperture errors)
      # Mask the data to exclude NaNs and infs from the background estimation
      mask = ((np.isinf(data)) | (np.isnan(data)))
 
      # Background annulus stats
-<<<<<<< HEAD
      bkg_stats = ApertureStats(data, annuli, sigma_clip=sigma_clip_bkg, mask=mask, sum_method=phot_method)
      bkg_median = bkg_stats.median
      bkg_median[np.isnan(bkg_median)]=0
      area_aper = aper_stats.sum_aper_area.value
      # area_annulus = bkg_stats.sum_aper_area.value
      total_bkg = bkg_median * area_aper
-=======
-     bkg_stats = ApertureStats(data, annuli, error=err, sigma_clip=sigma_clip_bkg, mask=mask, sum_method='exact')
-     bkg_per_pixel = bkg_stats.sum / bkg_stats.sum_aper_area.value
-     total_bkg = bkg_per_pixel * aper_stats.sum_aper_area.value
->>>>>>> 6b65d13 (Added aperture errors)
 
      # Errors on the background estimates
      bkg_err = bkg_stats.std * aper_stats.sum_aper_area.value
