@@ -1,12 +1,13 @@
 # Directories will be set in a locals file, not the config
 
-steps = ["source_find", "subtract_bkg", "aperture_photometry"]
+steps = ["source_find", "subtract_bkg", "aperture_photometry", "apcorr_step"]
 targets = ["ngc1097"]
 product = ["anchor"]
 bands = ["f150w"]
 version = 'v4p1'
 ptype = ["images"]
 projects = ["4793"]
+inst = ["NIRCam"]
 
 [parameters.r_opt]
 
@@ -20,7 +21,7 @@ plot = true
 sigma = 3.0
 coverage_mask = false
 # background parameters can be specified in _pix or in _pc;  if both are present, _pix takes precedence
-box_size_pc = 85
+box_size_pc = 100
 filter_size_pc = 15
 bkg_estimator = 'SExtractorBackground()'
 sigma_to_clip_bkg = 3.0
@@ -42,7 +43,8 @@ nsources = 100000
 
 [parameters.apcorr]
 
-eefraction = 0.80
+eefraction_value = 0.80
+apcorr_method = 'cluster'
 
 [parameters.photometry]
 
@@ -53,4 +55,4 @@ sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
 write = true
 overwrite = true
-cat_filetype = "csv"    # csv, fits, or other type that astropy table recognizes
+cat_filetype = "fits"    # csv, fits, or other type that astropy table recognizes

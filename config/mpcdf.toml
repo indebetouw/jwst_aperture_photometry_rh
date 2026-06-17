@@ -1,5 +1,5 @@
 # Paths
-jwst_dir = '/nexus/posix0/MIA-astro-env/eschinner/shared/PHANGS/JWST'
+jwst_dir = '/nexus/posix0/MIA-astro-env/eschinner/shared/PHANGS/JWST/'
 out_dir = '/nexus/posix0/MIA-astro-env/eschinner/reho/centres/jwst_aperture_photometry/catalogs/'
 crds_dir = "/nexus/posix0/MIA-astro-env/eschinner/jgonzalez/jwst_pipeline/crds_cache/jwst_ops/references/jwst/nircam/"
 

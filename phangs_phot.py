@@ -28,12 +28,15 @@ from photutils.centroids import centroid_quadratic
 from photutils.aperture import CircularAperture, CircularAnnulus, ApertureStats
 from photutils.aperture import aperture_photometry
 
+# SVO for aperture correction
+from astroquery.svo_fps import SvoFps
+
 # ------------------------------------------------
 # Configs
 # ------------------------------------------------
 
 config_file = 'config/config.toml'     # Photometry parameters
-local_file = 'config/local.toml'       # Paths to directories
+local_file = 'config/mpcdf.toml'       # Paths to directories
 
 def load_config(config_path: str) -> dict:
     with open(config_path, "rb") as f:
@@ -542,7 +545,7 @@ def compute_photometry(data,
           phot_method='exact',
           write=False, 
           overwrite=False,
-          apcorr=True, 
+          apcorr_step=True, 
           out_dir='./',
           cat_filetype="fits"):
      """Compute aperture photometry for sources and return catalog with RA, Dec, magnitudes, etc.
@@ -571,9 +574,9 @@ def compute_photometry(data,
           sources = sources[np.argsort(sources['flux'])[-use_brightest:]]
           print(f"using only {len(sources)} sources")
 
-     if apcorr:
+     if apcorr_step:
           # Get aperture correction parameters from CRDS file
-          radius, radius_sky_in, radius_sky_out, apcorr = get_apcorr_params(crds_dir, band, **conf['parameters']['apcorr'])
+          radius, radius_sky_in, radius_sky_out, apcorr = get_apcorr_params(crds_dir, band, inst='NIRCam', **conf['parameters']['apcorr'])
           print(f"Using aperture correction factor of {apcorr} for radius {radius} pixels.")
 
      # Do aperture photometry
@@ -630,8 +633,13 @@ def compute_photometry(data,
           phot_full['finder_flux_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['finder_flux'], header=header)
      # Aperture sum from circular aperture photometry (converted to AB magnitudes)
      phot_full['aperture_sum_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header)
-     if apcorr:
-          phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'] * apcorr, header=header)
+
+     if apcorr_step:
+          if apcorr.unit.is_equivalent(u.dimensionless_unscaled):
+               phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'] * apcorr, header=header)
+          elif apcorr.unit.is_equivalent(u.mag):
+               phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header) + apcorr.value
+     
      # Add the errors
      phot_full['bkg_err'] = np.asarray(bkg_err)
 
@@ -653,7 +661,7 @@ def compute_photometry(data,
 
      # Write the catalog if requested
      if write:
-          cat_name = f"{gal}_jwst_{band}_cat." + cat_filetype
+          cat_name = f"{gal}_jwst_{band}_cat_cluster_apcorr." + cat_filetype
           print(f"Writing catalog to {out_dir + cat_name}")
           phot_full.write(out_dir + cat_name, overwrite=overwrite)
 
@@ -702,7 +710,7 @@ def bkg_error_quantiles(data, annulus_masks, sigma=3.0):
                     
 
 
-def get_apcorr_params(crds_dir, band, eefraction_value=0.8):
+def get_apcorr_params(crds_dir, band, inst, eefraction_value=0.8, apcorr_method='crds'):
      """Get the aperture correction parameters from the CRDS apcorr file for a given filter and eefraction.
      Args:
           crds_dir: directory where the CRDS apcorr files are stored
@@ -714,32 +722,70 @@ def get_apcorr_params(crds_dir, band, eefraction_value=0.8):
           sky_out: the outer sky annulus radius in pixels
           apcorr: the aperture correction factor
      """
-     # Get the apcorr file using glob
-     apcorr_files = glob.glob(crds_dir + f"*apcorr*")
-     if len(apcorr_files) == 0:
-          raise FileNotFoundError(f"No apcorr files found for {band} at {crds_dir}")
+     # TODO: add option to use multiple methods, each of which ends up with its own column. 
+
+     # Aperture correction for point sources based on the encircled energy fraction
+     # from the crds calibration files. Multiply the flux by apcorr.
+     if apcorr_method == 'crds':
+
+          print(f"Getting parameters from CRDS for {band} with eefraction {eefraction_value}...")
+          apcorr_files = glob.glob(crds_dir + f"*apcorr*")
+
+          # Check that the files exist
+          if len(apcorr_files) == 0:
+               raise FileNotFoundError(f"No apcorr files found for {band} at {crds_dir}")
+          else:
+               print(f"Found apcorr files: {apcorr_files} in {crds_dir}")
+
+          # Load the most recent apcorr file (final in the list)
+          apcorr_data = fits.getdata(apcorr_files[-1], ext=1)
+
+          # Get data for a specified eefraction and filter
+          row = apcorr_data[apcorr_data['eefraction'] == eefraction_value]
+          row = row[(row['filter'] == band.upper())]
+          # Extract values
+          radius  = row['radius'][0]   # in pixels
+          sky_in  = row['skyin'][0]    # in pixels
+          sky_out = row['skyout'][0]   # in pixels
+          apcorr  = row['apcorr'][0] * u.dimensionless_unscaled  # factor to multiply enclosed flux to get total flux
+
+     # Aperture correction using factors derived in Rodriguez et al. 2025, based on Deger et al. (2022).
+     elif apcorr_method == 'cluster':
+
+          print(f"Using aperture correction values from Rodriguez et al. 2025")
+
+          # Load parameters from apcorr_rodriguez.ecsv
+          apcorr_val = Table.read('apcorr_rodriguez.ecsv', format='ascii.ecsv')
+          if band.lower() not in apcorr_val['band'].data:
+               raise ValueError(f"Filter {band} not found in Rodriguez et al. 2025 apcorr file. Please chose a different aperture correction method.")
+          
+          # TODO: get the pixel scale properly from header info
+          # These correction factors are only valid for a specific radius.
+          # pixel_scale = 0.031
+          radius = 4 #* pixel_scale
+          an_in = 2.
+          an_out = 3. 
+          sky_in = an_in * radius
+          sky_out = an_out * radius
+          apcorr_vega_mag = apcorr_val[apcorr_val['band'] == band.lower()]['apcorr']
+          
+          # Get the zero point from SVO
+          filter_info = SvoFps.get_filter_list(facility='JWST', instrument=inst)
+          zero_point_vega = filter_info[filter_info['filterID'] == f'JWST/{inst}.{band.upper()}']['ZeroPoint']
+          delta_mag = - 2.5*np.log10(zero_point_vega/3631.0)
+          apcorr_abmag = apcorr_vega_mag + delta_mag
+          apcorr = apcorr_abmag * u.mag
+
+     # TODO: add method for correction based on curve of growth. 
+
+     # If nothing is recognised, use a simplified approximation. 
      else:
-          print(f"Found apcorr files: {apcorr_files}")
+          print(f"Using default aperture correction parameters for {band} with eefraction {eefraction_value}...")
+          radius = filter_fwhm.get(band.upper(), 2.0)  # default to 2 pixels if filter not found
+          sky_in = radius + 2
+          sky_out = radius + 8
+          apcorr = (1.0 / eefraction_value) * u.dimensionless_unscaled # simple correction factor based on eefraction
 
-     # Load the file
-     apcorr_data = fits.getdata(apcorr_files[0], ext=1)
-     print(f"APCORR data columns: {apcorr_data.columns.names}")
-
-     # Print all the unique filters in the apcorr file
-     print("Unique eefraction values:", np.unique(apcorr_data['eefraction']))
-
-     # Get data for a specific eefraction (fraction of total flux enclosed within the aperture)
-     # Valid for point sources but would underestimate the correction for extended sources.
-     row = apcorr_data[apcorr_data['eefraction'] == eefraction_value]
-
-     # Limit to a specific filter 
-     row = row[(row['filter'] == band.upper())]
-
-     # Extract values
-     radius  = row['radius'][0]   # in pixels
-     sky_in  = row['skyin'][0]    # in pixels
-     sky_out = row['skyout'][0]  # in pixels
-     apcorr  = row['apcorr'][0]   # factor to multiply enclosed flux to get total flux
      return radius, sky_in, sky_out, apcorr
 
 # ------------------------------------------------
@@ -917,10 +963,10 @@ def do_photometry(
                          print(f"Warning: FWHM for {band.upper()} not found in filter_fwhm dictionary. Using default FWHM of {fwhm} pixels for source detection.")
 
                # TODO: is there a better way of doing this?
-               if "apcorr" in steps:
-                    apcorr = True
+               if "apcorr_step" in steps:
+                    apcorr_step = True
                else:
-                    apcorr = False
+                    apcorr_step = False
 
                # # ...or just set it to a fixed value (e.g., based on the PSF FWHM)
                # print(f"Setting aperture radius to {r_opt} pixels.")
@@ -940,7 +986,7 @@ def do_photometry(
                          band = band,
                          radius = r_opt,
                          sources = sources,
-                         apcorr = apcorr,
+                         apcorr_step = apcorr_step,
                          out_dir = local['out_dir'],
                          **conf['parameters']['photometry']
                     )

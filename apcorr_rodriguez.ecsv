@@ -1,0 +1,19 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: band, datatype: str}
+# - {name: apcorr, datatype: float64}
+# - {name: zp_v, datatype: float64}
+band apcorr zp_v
+f150w -0.63 0.0
+f187n -0.63 0.0
+f200w -0.63 759.59e-6
+f300m -0.68 377.25e-6
+f335m -0.66 305.60e-6
+f360m -0.67 266.13e-6
+f405n -0.67 0.0
+f430m -0.67 0.0
+f770w 0.0 64.83e-6
+f1000w 0.0 38.99e-6
+f1130w 0.0 30.42e-6
+f2100w 0.0 9.11e-6
