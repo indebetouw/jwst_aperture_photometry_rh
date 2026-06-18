@@ -755,32 +755,64 @@ def get_apcorr_params(crds_dir, band, inst, eefraction_value=0.8, apcorr_method=
           print(f"Using aperture correction values from Rodriguez et al. 2025")
 
           # Load parameters from apcorr_rodriguez.ecsv
-          apcorr_val = Table.read('apcorr_rodriguez.ecsv', format='ascii.ecsv')
-          if band.lower() not in apcorr_val['band'].data:
-               raise ValueError(f"Filter {band} not found in Rodriguez et al. 2025 apcorr file. Please chose a different aperture correction method.")
+          if not os.path.exists('apcorr_rodriguez.ecsv'):
+               raise FileNotFoundError("apcorr_rodriguez.ecsv not found. Please make sure the file is in the current directory.")
           
-          # TODO: get the pixel scale properly from header info
-          # These correction factors are only valid for a specific radius.
-          # pixel_scale = 0.031
-          radius = 4 #* pixel_scale
-          an_in = 2.
-          an_out = 3. 
-          sky_in = an_in * radius
-          sky_out = an_out * radius
-          apcorr_vega_mag = apcorr_val[apcorr_val['band'] == band.lower()]['apcorr']
-          
-          # Get the zero point from SVO
-          filter_info = SvoFps.get_filter_list(facility='JWST', instrument=inst)
-          zero_point_vega = filter_info[filter_info['filterID'] == f'JWST/{inst}.{band.upper()}']['ZeroPoint']
-          delta_mag = - 2.5*np.log10(zero_point_vega/3631.0)
-          apcorr_abmag = apcorr_vega_mag + delta_mag
-          apcorr = apcorr_abmag * u.mag
+          if inst.lower() == 'nircam':
+               apcorr_val = Table.read('apcorr_rodriguez.ecsv', format='ascii.ecsv')
+               if band.lower() not in apcorr_val['band'].data:
+                    raise ValueError(
+                         f"Filter {band} not found in Rodriguez et al. 2025 apcorr file."
+                         "\n Available filters: {apcorr_val['band'].data}"
+                         "\n Please chose a different aperture correction method in the config file [i.e. 'crds']."
+               )
+               
+               # TODO: get the pixel scale properly from header info
+               # These correction factors are only valid for a specific radius.
+               # pixel_scale = 0.031
+               radius = 4 #* pixel_scale
+               an_in = 2.
+               an_out = 3. 
+               sky_in = an_in * radius
+               sky_out = an_out * radius
+               apcorr_vega_mag = apcorr_val[apcorr_val['band'] == band.lower()]['apcorr']
+               
+               # Get the zero point from SVO
+               filter_info = SvoFps.get_filter_list(facility='JWST', instrument=inst)
+               zero_point_vega = filter_info[filter_info['filterID'] == f'JWST/{inst}.{band.upper()}']['ZeroPoint']
+               # delta_mag = - 2.5*np.log10(zero_point_vega/3631.0)
+               # Because the aperture correction is a flux ratio, mag system doesn't matter
+               apcorr_abmag = apcorr_vega_mag
+               apcorr = apcorr_abmag * u.mag
+
+          elif inst.lower() == 'miri':
+               print("Cluster aperture corrections not computed for MIRI. Use eefraction = 0.5 (50%) with CRDS.")
+               apcorr_files = glob.glob(crds_dir + f"*apcorr*")
+
+               # Check that the files exist
+               if len(apcorr_files) == 0:
+                    raise FileNotFoundError(f"No apcorr files found for {band} at {crds_dir}")
+               else:
+                    print(f"Found apcorr files: {apcorr_files} in {crds_dir}")
+
+               # Load the most recent apcorr file (final in the list)
+               apcorr_data = fits.getdata(apcorr_files[-1], ext=1)
+
+               # Get data for a specified eefraction and filter
+               row = apcorr_data[apcorr_data['eefraction'] == 0.5]
+               row = row[(row['filter'] == band.upper())]
+               # Extract values
+               radius  = row['radius'][0]   # in pixels
+               sky_in  = row['skyin'][0]    # in pixels
+               sky_out = row['skyout'][0]   # in pixels
+               apcorr  = row['apcorr'][0] * u.dimensionless_unscaled 
+
 
      # TODO: add method for correction based on curve of growth. 
 
      # If nothing is recognised, use a simplified approximation. 
      else:
-          print(f"Using default aperture correction parameters for {band} with eefraction {eefraction_value}...")
+          print(f"Using default (basic) aperture correction parameters for {band} with eefraction {eefraction_value}...")
           radius = filter_fwhm.get(band.upper(), 2.0)  # default to 2 pixels if filter not found
           sky_in = radius + 2
           sky_out = radius + 8
