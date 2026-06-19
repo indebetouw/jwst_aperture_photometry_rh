@@ -1,2 +1,5 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+
+# local config file
+/config/mac.toml
