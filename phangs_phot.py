@@ -354,7 +354,9 @@ def run_source_finder(img,
           roundhi=0.5, 
           sharplo=0.2, 
           sharphi=1.0, 
-          nsources=10000
+          nsources=10000,
+          cat_path='./',
+          cat_filename=None,
      ):
      """Find sources in the image using IRAFStarFinder.
      Args:
@@ -373,6 +375,10 @@ def run_source_finder(img,
      
      # Get the threshold image from the background calculation
      ths = snr_threshold * bkg.background_rms
+
+     # Add option to import an external source catalog
+     # instead of running a source finder. Useful for testing 
+     # without regen and matching cats with HST/MUSE
 
      # IRAFStarFinder 
      if finder == 'iraf':
@@ -396,7 +402,7 @@ def run_source_finder(img,
           # Run the source finder
           sources = source_finder(img)
 
-     if finder == 'peaks':
+     elif finder == 'peaks':
           # find_peaks looks for local maxima above a specified threshold.
           # Requires a bit of extra work to get results in the same format as IRAFStarFinder/DAOStarFinder, 
           # and it doesn't calculate sharpness or roundness.
@@ -481,7 +487,7 @@ def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, plot=
           print(f"Using only {len(sources)} sources.")
 
      print("Calculating optimal aperture...")
-     positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
+     positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
      radii = np.arange(1, max_r)
 
      # Define in and outer annuli for local background estimation
@@ -581,7 +587,7 @@ def compute_photometry(data,
 
      # Do aperture photometry
      print(f"Doing aperture photometry...")
-     positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
+     positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
      apertures = CircularAperture(positions, r=radius)
      aper_stats = ApertureStats(data, apertures, error=err)
      phot_full = aperture_photometry(data, apertures, error=err, method=phot_method)
@@ -873,9 +879,13 @@ filter_fwhm = {
 jwst_dir = local['jwst_dir']
 out_dir = local['out_dir']
 crds_dir = local['crds_dir']
-print(" ")
+cat_path = local['out_dir']  
+# TODO: add cat_path to local.toml if we want to load in an external catalog for photometry instead of running a source finder.
+
+print("-----------------------------------------")
 print(f"JWST data directory: {jwst_dir}")
 print(f"Output directory: {out_dir}")
+print("-----------------------------------------")
 
 # Check that input data directory exists
 if not os.path.exists(jwst_dir):
@@ -963,12 +973,36 @@ def do_photometry(
                          use_image = img_sub
                     else:
                          use_image = img
+
                     sources = run_source_finder(
                          img=use_image, 
                          header=header, 
                          bkg=bkg_background, 
+                         cat_path=cat_path,
                          **conf['parameters']['source_find'],
                     )
+               
+               else:
+                    print("Importing sources from external catalog...")
+                    # Load the external source catalog
+                    sources = Table.read(cat_path + cat_filename)
+
+                    # Checks that the colnames include x_centroid, y_centroid, flux, sharpness, roundness, mag, peak, etc. 
+                    # and print a warning if any are missing
+                    required_cols = ['xcentroid', 'ycentroid', 'flux']
+                    x_to_search_for = ['xcentroid', 'x_center', 'x_centroid', 'xcenter']
+                    y_to_search_for = ['ycentroid', 'y_center', 'y_centroid', 'ycenter']
+                    # Cycle through
+                    for col in required_cols:
+                         if col not in sources.colnames:
+                              # Check whether there is a xcenter and ycenter column instead of x_centroid and y_centroid, and if so, rename them
+                              if col == 'xcentroid' and 'x_center' in sources.colnames:
+                                   sources['xcentroid'] = sources['x_center']
+                              elif col == 'ycentroid' and 'y_center' in sources.colnames:
+                                   sources['ycentroid'] = sources['y_center']
+                              else:
+                                   print(f"Warning: Column '{col}' is missing from the external catalog."
+                                        f"\n Please make sure the catalog has the required columns: {required_cols}.")
 
                # **** Alternatively, load in a catalog computed by another method here ****
                # TODO: if loading in another catalog, need a path to it in local.toml. 
