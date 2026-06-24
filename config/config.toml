@@ -57,3 +57,4 @@ maxiters_for_bkg_clip = 5
 write = false
 overwrite = true
 cat_filetype = "fits"    # csv, fits, or other type that astropy table recognizes
+local_bkg_subtract = true

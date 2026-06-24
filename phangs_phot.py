@@ -123,6 +123,24 @@ def convert_aperture_sum_Jy_per_sr_to_abmag(aperture_sum_jy_sr, header):
 
 
 
+def convert_abmag_to_Jy_per_sr(abmag, header, unit='MJy/sr'):
+     """Convert AB magnitudes to Jy/sr.
+     Args:
+          abmag: AB magnitudes
+          header: FITS header containing WCS information to get pixel area in steradians
+                  and BUNIT for checking units of the output aperture sum.
+     Returns:
+          aperture sum in Jy/sr (numpy array)"""
+     # Get pixel area in steradians from header
+     pix_area_sr = get_pixarea_in_sr(header)
+     fnu_jy = 3631.0 * 10**(-0.4 * abmag)
+     aperture_sum_jy_sr = fnu_jy / pix_area_sr
+     if unit == 'MJy/sr' or unit == 'MJ/sr' or unit == 'mjy/sr':
+          aperture_sum_jy_sr = aperture_sum_jy_sr * 1e-6
+     return aperture_sum_jy_sr
+
+
+
 def get_pixarea_in_sr(header):
     """Get pixel area in steradians from FITS header.
     Args:
@@ -552,6 +570,7 @@ def compute_photometry(data,
           write=False, 
           overwrite=False,
           apcorr_step=True, 
+          local_bkg_subtract=True,
           out_dir='./',
           cat_filetype="fits"):
      """Compute aperture photometry for sources and return catalog with RA, Dec, magnitudes, etc.
@@ -612,7 +631,12 @@ def compute_photometry(data,
      bkg_err_scalefactor = np.sqrt(0.5*np.pi / bkg_stats.sum_aper_area.value)  # scale factor for background error based on area of annulus and aperture
 
      # Subtract background from aperture sum
-     phot_full['aperture_sum'] = phot_full['aperture_sum'] - total_bkg
+     if local_bkg_subtract:
+          phot_full['aperture_sum_mjysr'] = phot_full['aperture_sum'] - total_bkg
+          phot_full['aperture_sum_mjy'] = phot_full['aperture_sum_mjysr'] * get_pixarea_in_sr(header)
+     else:
+          phot_full['aperture_sum_mjysr'] = phot_full['aperture_sum']
+          phot_full['aperture_sum_mjy'] = phot_full['aperture_sum'] * get_pixarea_in_sr(header)
 
      # Copy source-finder morphology columns
      if 'flux' in sources.colnames:  # it won't be there for findpeaks method.  TODO could be added in find step
