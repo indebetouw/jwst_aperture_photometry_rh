@@ -35,8 +35,8 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config.toml'     # Photometry parameters
-local_file = 'config/mpcdf.toml'       # Paths to directories
+config_file = 'config/config_pahsub.toml'     # Photometry parameters
+local_file = 'config/local.toml'       # Paths to directories
 
 def load_config(config_path: str) -> dict:
     with open(config_path, "rb") as f:
@@ -213,9 +213,15 @@ def open_jwst(path, gal, dir, band, mosaic_ext="*anchor*.fits", get_coverage=Tru
           img = img_file.data
           header = img_file.header
           # Error
-          err_file = hdul['ERR']
-          err = err_file.data
-          err_header = err_file.header
+          hdunames = [hdu.name for hdu in hdul]
+          if 'ERR' in hdunames:
+               err_file = hdul['ERR']
+               err = err_file.data
+               err_header = err_file.header
+          else:
+               err_file = None
+               err = np.full_like(img, np.nan)
+               err_header = None
      # Check the names of the image and error extensions 
      print(f"Image file: {img_file}")
      print(f"Error file: {err_file}")
@@ -271,7 +277,7 @@ def subtract_bkg(img,
           filter_size_pix=3, 
           bkg_estimator=MedianBackground(), 
           coverage_mask=False,
-          plot=False,
+          doplot=False,
           sigma_to_clip_bkg=3.0,
           maxiters_for_bkg_clip=5,
           **kwargs):
@@ -300,7 +306,7 @@ def subtract_bkg(img,
      if type(filter_size_pix) != type([]):
           filter_size_pix = (filter_size_pix + 1, filter_size_pix + 1)
      if filter_size_pix[0] % 2 == 0:
-          filter_size_pix = filter_size_pix + 1
+          filter_size_pix = (filter_size_pix[0] + 1, filter_size_pix[1] + 1)
 
      bkg_estimator = eval(bkg_estimator) if isinstance(bkg_estimator, str) else bkg_estimator
 
@@ -334,7 +340,7 @@ def subtract_bkg(img,
      img_sub = img - bkg.background
      print(f"Background subtraction complete.")
 
-     if plot:
+     if doplot:
           # Plot the image, background, and background-subtracted image
           fig, ax = plt.subplots(1, 3, figsize=(18, 6))
           norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
@@ -354,6 +360,7 @@ def subtract_bkg(img,
           for a in ax:
                im = a.images[0]
                plt.colorbar(im, ax=a, pad=0.01, fraction=0.05)
+          plt.savefig(f"{gal}_{band}_background_subtraction.png", dpi=300)
 
      return img_sub, bkg_mean, bkg_rms, bkg
 
@@ -373,6 +380,7 @@ def run_source_finder(img,
           sharplo=0.2, 
           sharphi=1.0, 
           nsources=10000,
+          doplot=True,
           cat_path='./',
           cat_filename=None,
      ):
@@ -380,7 +388,7 @@ def run_source_finder(img,
      Args:
           img: 2D array of background-subtracted image data
           header: FITS header of the image (used for WCS and pixel scale)
-          finder: source finder to use (currently only 'iraf' supported)
+          finder: source finder to use (currently 'iraf' and 'peaks' supported)
           snr_threshold: signal-to-noise ratio threshold for source detection
           fwhm: FWHM of the PSF in pixels (used for source detection)
           roundlo, roundhi: roundness limits for source selection
@@ -466,6 +474,18 @@ def run_source_finder(img,
      sources['ra']=sk.ra
      sources['dec']=sk.dec
 
+     if doplot:
+          # Plot the image with sources 
+          fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+          norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
+                                vmax=np.nanpercentile(img, 99.99), 
+                                stretch=LogStretch())
+          ax.imshow(img, origin='lower', cmap='inferno', norm=norm)
+          ax.set_title(f"{gal.upper()} {band.upper()} mosaic")
+          im = ax.images[0]
+          plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
+          plt.savefig(out_dir+f"{gal}_{band}_source_finder.png", dpi=300)
+
      print(f"Found {len(sources)} sources")
      print(sources.colnames)
      return sources
@@ -483,7 +503,7 @@ def filter_catalog():
 # ------------------------------------------------
 # Optimal aperture and photometry
 # ------------------------------------------------
-def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, plot=True):
+def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, doplot=True):
      """Find the optimal aperture radius to use for the photometry from the 
         curve of growth of the brightest n sources. 
      Args:
@@ -878,7 +898,7 @@ def cross_match_catalogs(dir, filter, galaxy, phot_full, cat_image3):
 
 
 
-# Empirical filter FWHM
+# Empirical filter FWHM in pixels  
 # NIRCAM from https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-performance/nircam-point-spread-functions#gsc.tab=0
 # MIRI from https://jwst-docs.stsci.edu/jwst-mid-infrared-instrument/miri-performance/miri-point-spread-functions#gsc.tab=0
 filter_fwhm = {
@@ -891,6 +911,7 @@ filter_fwhm = {
     'F300M': 1.587,
     'F335M': 1.762,
     'F360M': 1.905,
+    'PAH33': 4.44,
     'F405N': 2.159,
     'F444W': 2.302,
     'F770W': 2.445,
@@ -943,13 +964,13 @@ def do_photometry(
 
      for gal in targets:
           # Get the path to the data
-          path = get_path_to_file(
-               wdir=jwst_dir, 
-               version=version, 
-               project=projects[0], 
-               galaxy=targets[0],
-               ptype=ptype[0],
-               filter=conf['bands'][0])
+          #path = get_path_to_file(
+          #     wdir=jwst_dir, 
+          #     version=version, 
+          #     project=projects[0], 
+          #     galaxy=targets[0],
+          #     ptype=ptype[0],
+          #     filter=conf['bands'][0])
 
           # Now loop through the filters for this galaxy
           for band in bands:
@@ -963,7 +984,7 @@ def do_photometry(
                # Open the JWST data file 
                img, err, snr_map, coverage_mask, header = open_jwst(
                     mosaic_ext = conf['product'],
-                    path = path, 
+                    path = jwst_dir+"/"+gal+"/", 
                     gal = gal, 
                     dir = jwst_dir, 
                     band = band
