@@ -304,7 +304,7 @@ def subtract_bkg(img,
           box_size_pix = (box_size_pix[0] + 1, box_size_pix[1] + 1)
 
      if type(filter_size_pix) != type([]):
-          filter_size_pix = (filter_size_pix + 1, filter_size_pix + 1)
+          filter_size_pix = (filter_size_pix, filter_size_pix)
      if filter_size_pix[0] % 2 == 0:
           filter_size_pix = (filter_size_pix[0] + 1, filter_size_pix[1] + 1)
 
@@ -711,7 +711,7 @@ def compute_photometry(data,
 
      # Write the catalog if requested
      if write:
-          cat_name = f"{gal}_jwst_{band}_cat_cluster_apcorr." + cat_filetype
+          cat_name = f"{gal}_jwst_{band}_cat_cluster_peaks." + cat_filetype
           print(f"Writing catalog to {out_dir + cat_name}")
           phot_full.write(out_dir + cat_name, overwrite=overwrite)
 
@@ -793,6 +793,11 @@ def get_apcorr_params(crds_dir, band, inst, eefraction_value=0.8, apcorr_method=
           # Get data for a specified eefraction and filter
           row = apcorr_data[apcorr_data['eefraction'] == eefraction_value]
           row = row[(row['filter'] == band.upper())]
+
+          if len(row) == 0:
+               row = apcorr_data[apcorr_data['eefraction'] == eefraction_value]
+               row = row[(row['pupil'] == band.upper())]
+
           # Extract values
           radius  = row['radius'][0]   # in pixels
           sky_in  = row['skyin'][0]    # in pixels
@@ -1028,9 +1033,21 @@ def do_photometry(
                     )
                
                else:
+                    # Load the filename from the config
+                    cat_filename = conf['parameters']['source_find']['cat_filename']
                     print("Importing sources from external catalog...")
                     # Load the external source catalog
                     sources = Table.read(cat_path + cat_filename)
+                    print(f"Loaded {len(sources)} sources from {cat_path + cat_filename}")
+
+                    # Check if any of the filename contains the word 'dolphot'
+                    # If so, then we need to do something a but different with the colnames. 
+                    if 'dolphot' in cat_filename.lower():
+                         print ("Using the dolphot catalog.")
+                         wcs = WCS(header)
+                         xcentroid, ycentroid = wcs.all_world2pix(sources['RA_deg'], sources['Dec_deg'], 0)
+                         sources['xcentroid'] = xcentroid
+                         sources['ycentroid'] = ycentroid
 
                     # Checks that the colnames include x_centroid, y_centroid, flux, sharpness, roundness, mag, peak, etc. 
                     # and print a warning if any are missing
