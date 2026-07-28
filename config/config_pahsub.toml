@@ -1,6 +1,8 @@
 # Directories will be set in a locals file, not the config
+# note: we don't have a way to save the bkgsub image yet so it has to be recreated if you do find or aperture_photometry
 
-steps = ["source_find", "subtract_bkg", "aperture_photometry"]
+# steps = ["subtract_bkg", "source_find", "aperture_photometry"]
+steps = ["subtract_bkg", "aperture_photometry"]
 targets = ["ngc5068"]
 product = ""
 bands = ["pah33"]
@@ -8,6 +10,7 @@ version = ''
 ptype = ["images"]
 projects = [""]
 inst = ["NIRCam"]
+cat_filetype = "csv"
 
 [parameters.r_opt]
 
@@ -40,7 +43,7 @@ roundhi = 0.5
 sharplo = 0.2
 sharphi = 1.0
 nsources = 100000
-cat_filename = ''
+# find_cat_filename = '' # override default of f"{gal}_jwst_{band}_find_cat." + cat_filetype
 
 [parameters.apcorr]
 
@@ -59,3 +62,4 @@ write = false
 overwrite = true
 cat_filetype = "csv"    # csv, fits, or other type that astropy table recognizes
 local_bkg_subtract = true
+# phot_cat_filename = '' # option to override default f"{gal}_jwst_{band}_cat." + cat_filetype
