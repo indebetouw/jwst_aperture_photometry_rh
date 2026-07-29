@@ -376,7 +376,7 @@ def subtract_bkg(img,
 
 
 # ------------------------------------------------
-# Source finding (using IRAF, DAO in progress)
+# Source finding (using IRAF or findpeaks, DAO in progress)
 # ------------------------------------------------
 def run_source_finder(img, 
                       gal,
@@ -498,7 +498,7 @@ def run_source_finder(img,
           ax.scatter(sources['xcentroid'], sources['ycentroid'], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.2)
           im = ax.images[0]
           plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
-          plt.savefig(out_dir+f"/{gal}_{band}_source_finder.png", dpi=300)
+          plt.savefig(out_dir+f"/{gal}_{band}_source_finder_{finder}.png", dpi=300)
 
      print(f"Found {len(sources)} sources")
      print(sources.colnames)
@@ -759,17 +759,22 @@ def compute_photometry(data,
           plt.xscale("log")
           plt.yscale("log")
           plt.savefig(out_dir+f"/{gal}_{band}_appflux_dflux.png", dpi=300)
-          # Plot the image with sources 
-          # fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-          # norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
-          #                       vmax=np.nanpercentile(img, 99.99), 
-          #                       stretch=LogStretch())
-          # ax.imshow(img, origin='lower', cmap='inferno', norm=norm)
-          # ax.set_title(f"{gal.upper()} {band.upper()} mosaic")
-          # ax.scatter(sources['xcentroid'], sources['ycentroid'], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.2)
-          # im = ax.images[0]
-          # plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
-          # plt.savefig(out_dir+f"/{gal}_{band}_source_finder.png", dpi=300)
+
+          # Plot the image with significant sources 
+          fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+          norm = ImageNormalize(vmin=np.nanpercentile(data, 25.00), 
+                                vmax=np.nanpercentile(data, 99.99), 
+                                stretch=LogStretch())
+          ax.imshow(data, origin='lower', cmap='inferno', norm=norm)
+          ax.set_title(f"{gal.upper()} {band.upper()}")
+          z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
+          ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
+          z=np.where(phot_full['aperture_flux_mJy']/phot_full['tot_err_mJy']>3)[0]
+          ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=30, marker='*',edgecolor='white', facecolor='none', lw=0.5, alpha=0.7,label="Total SNR>3")
+          ax.legend(loc="best",prop={"size":8})
+          im = ax.images[0]
+          plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
+          plt.savefig(out_dir+f"/{gal}_{band}_significant_sources.png", dpi=600)
 
 
 
