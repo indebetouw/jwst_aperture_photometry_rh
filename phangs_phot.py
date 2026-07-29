@@ -27,6 +27,7 @@ from photutils.detection import IRAFStarFinder, DAOStarFinder, find_peaks
 from photutils.centroids import centroid_quadratic
 from photutils.aperture import CircularAperture, CircularAnnulus, ApertureStats
 from photutils.aperture import aperture_photometry
+from photutils.utils import calc_total_error
 
 # SVO for aperture correction
 from astroquery.svo_fps import SvoFps
@@ -218,11 +219,17 @@ def open_jwst(path, gal, dir, band, mosaic_ext="*anchor*.fits", get_coverage=Tru
           if 'ERR' in hdunames:
                err_file = hdul['ERR']
                err = err_file.data
-               err_header = err_file.header
           else:
-               err_file = None
-               err = np.full_like(img, np.nan)
-               err_header = None
+               # estimate error from image - parameters are from Jimena's HST phot, probably need tuning for JWST
+               sigma_clip = SigmaClip(sigma=5., maxiters=10)
+               bkg_estimator = SExtractorBackground()
+               bkg = Background2D(img, (30,30), filter_size=(3, 3),  fill_value=0.0,
+                                     sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+               # 3rd parameter = Ratio of counts (e.g., electrons or photons) to the data units         
+               err = calc_total_error(img, bkg.background, effective_gain = header['XPOSURE']/header['PHOTMJSR']) 
+               # TODO double check units of calc_total_error() 
+               err_file = "Estimated from image"
+
      # Check the names of the image and error extensions 
      print(f"Image file: {img_file}")
      print(f"Error file: {err_file}")
@@ -643,7 +650,7 @@ def compute_photometry(data,
      positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
      apertures = CircularAperture(positions, r=radius)
      aper_stats = ApertureStats(data, apertures, error=err)
-     phot_full = aperture_photometry(data, apertures, error=err, method=phot_method)
+     phot_full = aperture_photometry(data, apertures, error=err, method=phot_method) # Jimena also passed a mask - why?
 
      # Annulus
      annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
@@ -653,6 +660,7 @@ def compute_photometry(data,
      mask = ((np.isinf(data)) | (np.isnan(data)))
 
      # Background annulus stats
+     # TODO: Jimena did this in counts space, so there is potentially a sqrt(gain) factor that needs consideration. 
      bkg_stats = ApertureStats(data, annuli, sigma_clip=sigma_clip_bkg, mask=mask, sum_method=phot_method)
      bkg_median = bkg_stats.median
      bkg_median[np.isnan(bkg_median)]=0
@@ -705,6 +713,7 @@ def compute_photometry(data,
           elif apcorr.unit.is_equivalent(u.mag):
                phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header) + apcorr.value
           # add aperture correction to aperture_flux_mJy 
+          # TODO do we need to multiply the error by the apcorr? Jimena did not.
           if 'aperture_flux_mJy' in phot_full.colnames:
                phot_full['aperture_flux_mJy_apcorr'] = phot_full['aperture_flux_mJy'] * apcorr if apcorr.unit.is_equivalent(u.dimensionless_unscaled) else phot_full['aperture_flux_mJy'] + apcorr.value
      
@@ -714,11 +723,12 @@ def compute_photometry(data,
      elif band.lower()=='f300m' or band.lower()=='f360m' or band.lower()=='f444w':
           phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2 * bkg_err_scalefactor**2)
      else:
-          print(f"Band {band} not recognized for error calculation. Setting total_aperture_sum_err to sqrt(aperture_sum_err**2 + bkg_err**2).")
+          print(f"Band {band} not recognized for error calculation. Setting total_aperture_sum_err to max possible, sqrt(aperture_sum_err**2 + bkg_err**2).")
           phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2)
 
      # Add the errors
      phot_full['bkg_err_mJy'] = np.asarray(bkg_err_mJy)
+     phot_full['poisson_err_mJy'] = np.asarray(phot_full['aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
      phot_full['tot_err_mJy'] = np.asarray(phot_full['total_aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
 
  
@@ -741,10 +751,11 @@ def compute_photometry(data,
      if doplot:
           # plot photometry results
           fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-          # TODO aperture_sum_error is coming back all-NaN from photutils why?
-          ax.plot(phot_full['aperture_flux_mJy'], phot_full['bkg_err_mJy'], 'o', markersize=1, alpha=0.5)
+          ax.plot(phot_full['aperture_flux_mJy'], phot_full['bkg_err_mJy']/phot_full['aperture_flux_mJy'], 'o', markersize=1, alpha=0.5, label="bg")
+          ax.plot(phot_full['aperture_flux_mJy'], phot_full['poisson_err_mJy']/phot_full['aperture_flux_mJy'], 'o', markersize=1, alpha=0.5, label="poisson")
+          ax.legend(loc="best",prop={"size":8})
           ax.set_xlabel("Flux (mJy)")
-          ax.set_ylabel("Error (mJy)")
+          ax.set_ylabel("Error/Flux")
           plt.xscale("log")
           plt.yscale("log")
           plt.savefig(out_dir+f"/{gal}_{band}_appflux_dflux.png", dpi=300)
@@ -1128,8 +1139,9 @@ def do_photometry(
                # Either get the optimum radius based on curve of growth...
                if 'r_opt' in steps:
                     print(f"Computing optimal aperture for photometry...")
+                    if 'subtract_bkg' not in steps:
+                         print("Warning: r_opt step is being run without background subtraction. This may affect the results.")
                     r_opt = get_optimal_aperture(
-                         # TODO this is important: do we want to use the background-subtracted image or the original image for this step?
                          data = use_image,
                          sources = sources,
                          **conf['parameters']['r_opt']
