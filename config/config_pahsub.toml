@@ -1,0 +1,65 @@
+# Directories will be set in a locals file, not the config
+# note: we don't have a way to save the bkgsub image yet so it has to be recreated if you do find or aperture_photometry
+
+# steps = ["subtract_bkg", "source_find", "aperture_photometry"]
+steps = ["subtract_bkg", "aperture_photometry"]
+targets = ["ngc5068"]
+product = ""
+bands = ["pah33"]
+version = ''
+ptype = ["images"]
+projects = [""]
+inst = ["NIRCam"]
+cat_filetype = "csv"
+
+[parameters.r_opt]
+
+max_r = 20
+brightest_ropt = 50
+frac = 0.95
+plot = true
+
+[parameters.bkg_subtract]
+
+sigma = 3.0
+coverage_mask = false
+# background parameters can be specified in _pix or in _pc;  if both are present, _pix takes precedence
+box_size_pc = 100
+filter_size_pc = 15
+bkg_estimator = 'SExtractorBackground()'
+sigma_to_clip_bkg = 3.0
+maxiters_for_bkg_clip = 5
+# TODO: This really needs to be read from a data file 
+dist_Mpc =5.2     
+plot = false
+
+[parameters.source_find]
+
+finder = 'peaks'
+snr_threshold = 3.0
+fwhm = 2.0
+roundlo = -0.5
+roundhi = 0.5
+sharplo = 0.2
+sharphi = 1.0
+nsources = 100000
+# find_cat_filename = '' # override default of f"{gal}_jwst_{band}_find_cat." + cat_filetype
+
+[parameters.apcorr]
+
+eefraction_value = 0.80
+apcorr_method = 'cluster'
+
+[parameters.photometry]
+
+use_brightest = false
+# TODO add an option to make this scale with r_opt
+radius_sky_in = 12
+radius_sky_out = 16
+sigma_to_clip_bkg = 3.0
+maxiters_for_bkg_clip = 5
+write = false
+overwrite = true
+cat_filetype = "csv"    # csv, fits, or other type that astropy table recognizes
+local_bkg_subtract = true
+# phot_cat_filename = '' # option to override default f"{gal}_jwst_{band}_cat." + cat_filetype

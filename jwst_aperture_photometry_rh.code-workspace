@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../miniforge3/envs/pphot/lib/python3.13/site-packages/photutils"
+		},
+		{
+			"path": "../phangs_phot"
+		}
+	],
+	"settings": {}
+}

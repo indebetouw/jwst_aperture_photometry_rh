@@ -27,6 +27,7 @@ from photutils.detection import IRAFStarFinder, DAOStarFinder, find_peaks
 from photutils.centroids import centroid_quadratic
 from photutils.aperture import CircularAperture, CircularAnnulus, ApertureStats
 from photutils.aperture import aperture_photometry
+from photutils.utils import calc_total_error
 
 # SVO for aperture correction
 from astroquery.svo_fps import SvoFps
@@ -35,8 +36,8 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config.toml'     # Photometry parameters
-local_file = 'config/mpcdf.toml'       # Paths to directories
+config_file = 'config/config_pahsub.toml'     # Photometry parameters
+local_file = 'config/local.toml'       # Paths to directories
 
 def load_config(config_path: str) -> dict:
     with open(config_path, "rb") as f:
@@ -54,6 +55,7 @@ projects = conf['projects']
 product = conf['product']
 version = conf['version']
 ptype = conf['ptype']
+cat_filetype = conf['cat_filetype']
 
 # Number of targets to process
 num_targets = len(targets)
@@ -213,9 +215,21 @@ def open_jwst(path, gal, dir, band, mosaic_ext="*anchor*.fits", get_coverage=Tru
           img = img_file.data
           header = img_file.header
           # Error
-          err_file = hdul['ERR']
-          err = err_file.data
-          err_header = err_file.header
+          hdunames = [hdu.name for hdu in hdul]
+          if 'ERR' in hdunames:
+               err_file = hdul['ERR']
+               err = err_file.data
+          else:
+               # estimate error from image - parameters are from Jimena's HST phot, probably need tuning for JWST
+               sigma_clip = SigmaClip(sigma=5., maxiters=10)
+               bkg_estimator = SExtractorBackground()
+               bkg = Background2D(img, (30,30), filter_size=(3, 3),  fill_value=0.0,
+                                     sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+               # 3rd parameter = Ratio of counts (e.g., electrons or photons) to the data units         
+               err = calc_total_error(img, bkg.background, effective_gain = header['XPOSURE']/header['PHOTMJSR']) 
+               # TODO double check units of calc_total_error() 
+               err_file = "Estimated from image"
+
      # Check the names of the image and error extensions 
      print(f"Image file: {img_file}")
      print(f"Error file: {err_file}")
@@ -266,12 +280,14 @@ def match(
 # ------------------------------------------------
 # Background subtraction
 # ------------------------------------------------
-def subtract_bkg(img, 
+def subtract_bkg(img,
+          gal,
+          band,
           box_size_pix=50, 
           filter_size_pix=3, 
           bkg_estimator=MedianBackground(), 
           coverage_mask=False,
-          plot=False,
+          doplot=True,
           sigma_to_clip_bkg=3.0,
           maxiters_for_bkg_clip=5,
           **kwargs):
@@ -334,7 +350,7 @@ def subtract_bkg(img,
      img_sub = img - bkg.background
      print(f"Background subtraction complete.")
 
-     if plot:
+     if doplot:
           # Plot the image, background, and background-subtracted image
           fig, ax = plt.subplots(1, 3, figsize=(18, 6))
           norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
@@ -354,14 +370,17 @@ def subtract_bkg(img,
           for a in ax:
                im = a.images[0]
                plt.colorbar(im, ax=a, pad=0.01, fraction=0.05)
+          plt.savefig(out_dir+f"/{gal}_{band}_background_subtraction.png", dpi=300)
 
      return img_sub, bkg_mean, bkg_rms, bkg
 
 
 # ------------------------------------------------
-# Source finding (using IRAF, DAO in progress)
+# Source finding (using IRAF or findpeaks, DAO in progress)
 # ------------------------------------------------
 def run_source_finder(img, 
+                      gal,
+                      band,
           header, 
           bkg,
           finder='iraf', 
@@ -373,14 +392,16 @@ def run_source_finder(img,
           sharplo=0.2, 
           sharphi=1.0, 
           nsources=10000,
-          cat_path='./',
-          cat_filename=None,
+          doplot=True,
+          write=True, # write out finder catalog
+          overwrite=True,
+          **kwargs
      ):
      """Find sources in the image using IRAFStarFinder.
      Args:
           img: 2D array of background-subtracted image data
           header: FITS header of the image (used for WCS and pixel scale)
-          finder: source finder to use (currently only 'iraf' supported)
+          finder: source finder to use (currently 'iraf' and 'peaks' supported)
           snr_threshold: signal-to-noise ratio threshold for source detection
           fwhm: FWHM of the PSF in pixels (used for source detection)
           roundlo, roundhi: roundness limits for source selection
@@ -466,8 +487,30 @@ def run_source_finder(img,
      sources['ra']=sk.ra
      sources['dec']=sk.dec
 
+     if doplot:
+          # Plot the image with sources 
+          fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+          norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
+                                vmax=np.nanpercentile(img, 99.99), 
+                                stretch=LogStretch())
+          ax.imshow(img, origin='lower', cmap='inferno', norm=norm)
+          ax.set_title(f"{gal.upper()} {band.upper()} mosaic")
+          ax.scatter(sources['xcentroid'], sources['ycentroid'], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.2)
+          im = ax.images[0]
+          plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
+          plt.savefig(out_dir+f"/{gal}_{band}_source_finder_{finder}.png", dpi=300)
+
      print(f"Found {len(sources)} sources")
      print(sources.colnames)
+
+     if write:
+          if "find_cat_filename" in kwargs:
+               cat_name = kwargs["find_cat_filename"]
+          else:
+               cat_name = f"{gal}_jwst_{band}_find_cat." + cat_filetype
+          print(f"Writing catalog to {out_dir + cat_name}")
+          sources.write(out_dir + cat_name, overwrite=overwrite)
+
      return sources
 
 
@@ -483,7 +526,7 @@ def filter_catalog():
 # ------------------------------------------------
 # Optimal aperture and photometry
 # ------------------------------------------------
-def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, plot=True):
+def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, doplot=True):
      """Find the optimal aperture radius to use for the photometry from the 
         curve of growth of the brightest n sources. 
      Args:
@@ -567,12 +610,12 @@ def compute_photometry(data,
           sigma_to_clip_bkg=3.0,
           maxiters_for_bkg_clip=5,
           phot_method='exact',
+          doplot=True,
           write=False, 
           overwrite=False,
           apcorr_step=True, 
           local_bkg_subtract=True,
-          out_dir='./',
-          cat_filetype="fits"):
+          **kwargs):
      """Compute aperture photometry for sources and return catalog with RA, Dec, magnitudes, etc.
      
      Args:
@@ -587,8 +630,6 @@ def compute_photometry(data,
           phot_method: method to use for photometry (e.g., 'exact', 'subpixel', etc.)
           use_brightest: if True, only use the brightest sources for photometry
           write: if True, write catalog to out_dir with name {gal}_jwst_{band}_cat.fits
-          out_dir: directory to write catalog if write=True
-          cat_filetype: anything that astropy table recognizes - csv, fits
 
      Returns:
           phot_full: Table with photometry results, including RA, Dec, aperture sum, magnitudes, etc.
@@ -609,7 +650,7 @@ def compute_photometry(data,
      positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
      apertures = CircularAperture(positions, r=radius)
      aper_stats = ApertureStats(data, apertures, error=err)
-     phot_full = aperture_photometry(data, apertures, error=err, method=phot_method)
+     phot_full = aperture_photometry(data, apertures, error=err, method=phot_method) # Jimena also passed a mask - why?
 
      # Annulus
      annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
@@ -619,24 +660,25 @@ def compute_photometry(data,
      mask = ((np.isinf(data)) | (np.isnan(data)))
 
      # Background annulus stats
+     # TODO: Jimena did this in counts space, so there is potentially a sqrt(gain) factor that needs consideration. 
      bkg_stats = ApertureStats(data, annuli, sigma_clip=sigma_clip_bkg, mask=mask, sum_method=phot_method)
      bkg_median = bkg_stats.median
      bkg_median[np.isnan(bkg_median)]=0
-     area_aper = aper_stats.sum_aper_area.value
-     # area_annulus = bkg_stats.sum_aper_area.value
-     total_bkg = bkg_median * area_aper
 
-     # Errors on the background estimates
-     bkg_err = bkg_stats.std * aper_stats.sum_aper_area.value
-     bkg_err_scalefactor = np.sqrt(0.5*np.pi / bkg_stats.sum_aper_area.value)  # scale factor for background error based on area of annulus and aperture
+     # Error on the flux due to background estimation uncertainty.
+     # The worst case is that of structured background, where the error scales with the area of the aperture.  
+     # The best case is that of unstructured background, where the error scales with the square root of the area of the aperture.  
+     bkg_err_MJysrpix = bkg_stats.std * aper_stats.sum_aper_area.value
+     bkg_err_mJy = bkg_err_MJysrpix * get_pixarea_in_sr(header) * 1e9
+     bkg_err_scalefactor = np.sqrt(0.5*np.pi / bkg_stats.sum_aper_area.value)  # scale factor for background error based on area of annulus 
 
      # Subtract background from aperture sum
      if local_bkg_subtract:
-          phot_full['aperture_sum_mjysr'] = phot_full['aperture_sum'] - total_bkg
-          phot_full['aperture_sum_mjy'] = phot_full['aperture_sum_mjysr'] * get_pixarea_in_sr(header)
+          phot_full['aperture_flux_mJy'] = (phot_full['aperture_sum'] - bkg_median * aper_stats.sum_aper_area.value) * get_pixarea_in_sr(header) * 1e9
+          phot_full['bkg_median_MJysr'] = bkg_median
+          phot_full['bkg_flux_mJy'] = bkg_median * get_pixarea_in_sr(header) * 1e9
      else:
-          phot_full['aperture_sum_mjysr'] = phot_full['aperture_sum']
-          phot_full['aperture_sum_mjy'] = phot_full['aperture_sum'] * get_pixarea_in_sr(header)
+          phot_full['aperture_flux_mJy'] = phot_full['aperture_sum'] * get_pixarea_in_sr(header) * 1e9
 
      # Copy source-finder morphology columns
      if 'flux' in sources.colnames:  # it won't be there for findpeaks method.  TODO could be added in find step
@@ -663,25 +705,33 @@ def compute_photometry(data,
           phot_full['finder_flux_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['finder_flux'], header=header)
      # Aperture sum from circular aperture photometry (converted to AB magnitudes)
      phot_full['aperture_sum_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header)
+     # TODO add finder_flux_mjy
 
      if apcorr_step:
           if apcorr.unit.is_equivalent(u.dimensionless_unscaled):
                phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'] * apcorr, header=header)
           elif apcorr.unit.is_equivalent(u.mag):
                phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header) + apcorr.value
+          # add aperture correction to aperture_flux_mJy 
+          # TODO do we need to multiply the error by the apcorr? Jimena did not.
+          if 'aperture_flux_mJy' in phot_full.colnames:
+               phot_full['aperture_flux_mJy_apcorr'] = phot_full['aperture_flux_mJy'] * apcorr if apcorr.unit.is_equivalent(u.dimensionless_unscaled) else phot_full['aperture_flux_mJy'] + apcorr.value
      
-     # Add the errors
-     phot_full['bkg_err'] = np.asarray(bkg_err)
-
      # TODO: Is there a better way to do this than a list?
      if band.lower()=='f335m' or band.lower()=='f770w' or band.lower()=='f1000w' or band.lower()=='f1130w' or band.lower()=='f2100w':
-          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err**2)
+          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2)
      elif band.lower()=='f300m' or band.lower()=='f360m' or band.lower()=='f444w':
-          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err**2 * bkg_err_scalefactor**2)
+          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2 * bkg_err_scalefactor**2)
      else:
-          print(f"Band {band} not recognized for error calculation. Setting total_aperture_sum_err to sqrt(aperture_sum_err**2 + bkg_err**2).")
-          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err**2)
+          print(f"Band {band} not recognized for error calculation. Setting total_aperture_sum_err to max possible, sqrt(aperture_sum_err**2 + bkg_err**2).")
+          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2)
 
+     # Add the errors
+     phot_full['bkg_err_mJy'] = np.asarray(bkg_err_mJy)
+     phot_full['poisson_err_mJy'] = np.asarray(phot_full['aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
+     phot_full['tot_err_mJy'] = np.asarray(phot_full['total_aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
+
+ 
      # Sort by aperture flux
      phot_full.sort("aperture_sum")
      phot_full.reverse()
@@ -691,9 +741,42 @@ def compute_photometry(data,
 
      # Write the catalog if requested
      if write:
-          cat_name = f"{gal}_jwst_{band}_cat_cluster_peaks." + cat_filetype
+          if "phot_cat_filename" in kwargs:
+               cat_name = kwargs["phot_cat_filename"]
+          else:
+               cat_name = f"{gal}_jwst_{band}_cat." + cat_filetype
           print(f"Writing catalog to {out_dir + cat_name}")
           phot_full.write(out_dir + cat_name, overwrite=overwrite)
+
+     if doplot:
+          # plot photometry results
+          fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+          ax.plot(phot_full['aperture_flux_mJy'], phot_full['bkg_err_mJy']/phot_full['aperture_flux_mJy'], 'o', markersize=1, alpha=0.5, label="bg")
+          ax.plot(phot_full['aperture_flux_mJy'], phot_full['poisson_err_mJy']/phot_full['aperture_flux_mJy'], 'o', markersize=1, alpha=0.5, label="poisson")
+          ax.legend(loc="best",prop={"size":8})
+          ax.set_xlabel("Flux (mJy)")
+          ax.set_ylabel("Error/Flux")
+          plt.xscale("log")
+          plt.yscale("log")
+          plt.savefig(out_dir+f"/{gal}_{band}_appflux_dflux.png", dpi=300)
+
+          # Plot the image with significant sources 
+          fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+          norm = ImageNormalize(vmin=np.nanpercentile(data, 25.00), 
+                                vmax=np.nanpercentile(data, 99.99), 
+                                stretch=LogStretch())
+          ax.imshow(data, origin='lower', cmap='inferno', norm=norm)
+          ax.set_title(f"{gal.upper()} {band.upper()}")
+          z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
+          ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
+          z=np.where(phot_full['aperture_flux_mJy']/phot_full['tot_err_mJy']>3)[0]
+          ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=30, marker='*',edgecolor='white', facecolor='none', lw=0.5, alpha=0.7,label="Total SNR>3")
+          ax.legend(loc="best",prop={"size":8})
+          im = ax.images[0]
+          plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
+          plt.savefig(out_dir+f"/{gal}_{band}_significant_sources.png", dpi=600)
+
+
 
      return apertures, phot_full
 
@@ -883,7 +966,7 @@ def cross_match_catalogs(dir, filter, galaxy, phot_full, cat_image3):
 
 
 
-# Empirical filter FWHM
+# Empirical filter FWHM in pixels  
 # NIRCAM from https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-performance/nircam-point-spread-functions#gsc.tab=0
 # MIRI from https://jwst-docs.stsci.edu/jwst-mid-infrared-instrument/miri-performance/miri-point-spread-functions#gsc.tab=0
 filter_fwhm = {
@@ -896,6 +979,7 @@ filter_fwhm = {
     'F300M': 1.587,
     'F335M': 1.762,
     'F360M': 1.905,
+    'PAH33': 4.44,
     'F405N': 2.159,
     'F444W': 2.302,
     'F770W': 2.445,
@@ -948,13 +1032,13 @@ def do_photometry(
 
      for gal in targets:
           # Get the path to the data
-          path = get_path_to_file(
-               wdir=jwst_dir, 
-               version=version, 
-               project=projects[0], 
-               galaxy=targets[0],
-               ptype=ptype[0],
-               filter=conf['bands'][0])
+          #path = get_path_to_file(
+          #     wdir=jwst_dir, 
+          #     version=version, 
+          #     project=projects[0], 
+          #     galaxy=targets[0],
+          #     ptype=ptype[0],
+          #     filter=conf['bands'][0])
 
           # Now loop through the filters for this galaxy
           for band in bands:
@@ -968,7 +1052,7 @@ def do_photometry(
                # Open the JWST data file 
                img, err, snr_map, coverage_mask, header = open_jwst(
                     mosaic_ext = conf['product'],
-                    path = path, 
+                    path = jwst_dir+"/"+gal+"/", 
                     gal = gal, 
                     dir = jwst_dir, 
                     band = band
@@ -993,34 +1077,43 @@ def do_photometry(
 
                     img_sub, bkg_mean, bkg_rms, bkg_background = subtract_bkg(
                          img=img, 
+                         gal=gal,
+                         band=band,
                          **conf['parameters']['bkg_subtract'],
                     )
 
+               if 'subtract_bkg' in steps:
+                    use_image = img_sub
+               else:
+                    use_image = img
+
                if 'source_find' in steps:
                     # Get sources using the source finder
-                    if 'subtract_bkg' in steps:
-                         use_image = img_sub
-                    else:
-                         use_image = img
 
                     sources = run_source_finder(
                          img=use_image, 
+                         gal=gal,
+                         band=band,
                          header=header, 
                          bkg=bkg_background, 
-                         cat_path=cat_path,
                          **conf['parameters']['source_find'],
                     )
                
                else:
                     # Load the filename from the config
-                    cat_filename = conf['parameters']['source_find']['cat_filename']
-                    print("Importing sources from external catalog...")
-                    # Load the external source catalog
+                    if "find_cat_filename" in conf['parameters']['source_find']:
+                         cat_filename = conf['parameters']['source_find']['find_cat_filename']
+                    else:
+                         cat_filename = f"{gal}_jwst_{band}_find_cat." + cat_filetype
+                    print("Importing sources from existing catalog...")
+                    # Load the existing source catalog
                     sources = Table.read(cat_path + cat_filename)
                     print(f"Loaded {len(sources)} sources from {cat_path + cat_filename}")
 
                     # Check if any of the filename contains the word 'dolphot'
-                    # If so, then we need to do something a but different with the colnames. 
+                    # If so, then we need to do something a bit different with the colnames. 
+                    # RI: I would prefer to fix the dolphot catalog upstream and have the right columns by the time we get here, 
+                    # but that might be more work than just doing this here.
                     if 'dolphot' in cat_filename.lower():
                          print ("Using the dolphot catalog.")
                          wcs = WCS(header)
@@ -1051,8 +1144,10 @@ def do_photometry(
                # Either get the optimum radius based on curve of growth...
                if 'r_opt' in steps:
                     print(f"Computing optimal aperture for photometry...")
+                    if 'subtract_bkg' not in steps:
+                         print("Warning: r_opt step is being run without background subtraction. This may affect the results.")
                     r_opt = get_optimal_aperture(
-                         data = img_sub, 
+                         data = use_image,
                          sources = sources,
                          **conf['parameters']['r_opt']
                     )
@@ -1086,7 +1181,8 @@ def do_photometry(
                if 'aperture_photometry' in steps:
                     print(f"Performing photometry on {len(sources)} sources with aperture radius of {r_opt} pixels.")
                     apertures, catalog = compute_photometry(
-                         data = img_sub, 
+                         # TODO this is important: do we want to use the background-subtracted image or the original image for this step?
+                         data = use_image,
                          err = err,
                          header = header, 
                          gal = gal, 
