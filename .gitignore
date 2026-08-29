@@ -5,3 +5,5 @@ __pycache__/
 /config/mac.toml
 jwst_aperture_photometry_rh.code-workspace
 config/local.toml
+.vscode/settings.json
+.vscode/launch.json

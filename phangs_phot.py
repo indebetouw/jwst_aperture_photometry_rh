@@ -11,12 +11,13 @@ import matplotlib.pyplot as plt
 import tomllib
 import os
 import pdb
+import warnings
 from sys import exit
 from scipy.spatial import cKDTree
 
 import astropy.units as u
 from astropy import wcs
-from astropy.wcs import WCS
+from astropy.wcs import WCS, FITSFixedWarning
 from astropy.io import fits
 from astropy.stats import SigmaClip
 from astropy.table import Table, join, hstack
@@ -221,13 +222,20 @@ def open_jwst(filename, get_coverage=True):
                # estimate error from image - parameters are from Jimena's HST phot, probably need tuning for JWST
                sigma_clip = SigmaClip(sigma=5., maxiters=10)
                bkg_estimator = SExtractorBackground()
-               bkg = Background2D(img, (30,30), filter_size=(3, 3),  fill_value=0.0,
-                                     sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+               coverage_mask = (~np.isfinite(img)) | (img == 0)
+               bkg = Background2D(
+                    img,
+                    (30,30),
+                    filter_size=(3, 3),
+                    fill_value=0.0,
+                    sigma_clip=sigma_clip,
+                    bkg_estimator=bkg_estimator,
+                    coverage_mask=coverage_mask,
+               )
                # 3rd parameter = Ratio of counts (e.g., electrons or photons) to the data units         
                err = calc_total_error(img, bkg.background, effective_gain = header['XPOSURE']/header['PHOTMJSR']) 
                # TODO double check units of calc_total_error() 
                err_file = "Estimated from image"
-
      # Check the names of the image and error extensions 
      print(f"Image file: {img_file}")
      print(f"Error file: {err_file}")
@@ -278,34 +286,31 @@ def match(
 # ------------------------------------------------
 # Background subtraction
 # ------------------------------------------------
-def subtract_bkg(img,
+# TODO: need to include valid mask based on weight image or other metric
+
+def _background_filename_for(image_path):
+     """Return the standard cached background filename for an image."""
+     base, _ = os.path.splitext(image_path)
+     return f"{base}_background.fits"
+
+
+def calculate_bkg(img,
           gal,
           band,
-          box_size_pix=50, 
-          filter_size_pix=3, 
-          bkg_estimator=MedianBackground(), 
+          box_size_pix=50,
+          filter_size_pix=3,
+          bkg_estimator=MedianBackground(),
           coverage_mask=False,
           doplot=True,
           sigma_to_clip_bkg=3.0,
           maxiters_for_bkg_clip=5,
+          image_path=None,
+          header=None,
           **kwargs):
-     """Estimate and subtract background from image using Background2D.
-     Args:
-          img: 2D array of image data
-          box_size_pix: size of boxes for background estimation (in pixels)
-          filter_size_pix: size of median filter to apply to background (in pixels)
-          bkg_estimator: background estimator to use (default is MedianBackground())
-          coverage_mask: boolean array where True indicates pixels to exclude from background estimation (e.g., low coverage or bad data).
-     Returns:
-          img_sub: background-subtracted image
-          bkg_mean: mean background level (in same units as img)
-          bkg_rms: background RMS (in same units as img)"""
-     
-     # estimate background
-     # TODO: need to include valid mask based on weight image or other metric
+     """Estimate the background model and save it to a standard background FITS file."""
+
      sigma_clip = SigmaClip(sigma=sigma_to_clip_bkg, maxiters=maxiters_for_bkg_clip)
 
-     # Check if box size is even. If it is, add one to each of the values
      if type(box_size_pix) != type([]):
           box_size_pix = (box_size_pix, box_size_pix)
      if box_size_pix[0] % 2 == 0:
@@ -318,12 +323,13 @@ def subtract_bkg(img,
 
      bkg_estimator = eval(bkg_estimator) if isinstance(bkg_estimator, str) else bkg_estimator
 
-    
      if coverage_mask is False:
-          print(f"Creating coverage mask")
+          print("Creating coverage mask")
           coverage_mask = (~np.isfinite(img)) | (img == 0)
 
      # note: photutils<3.0 used edge_method='pad' by default, but photutils>=3.0 does not have this option and instead pads with fill_value=0.0 by default.
+     # Explicitly mask invalid and zero-valued pixels before the background estimate to avoid
+     # the non-finite-data warning emitted by photutils.Background2D.
      bkg = Background2D(
           img,
           box_size=box_size_pix,
@@ -331,47 +337,94 @@ def subtract_bkg(img,
           sigma_clip=sigma_clip,
           bkg_estimator=bkg_estimator,
           coverage_mask=coverage_mask,
-          )
+     )
 
      rms_map = np.array(bkg.background_rms, dtype=float)
      valid_rms = (~coverage_mask) & np.isfinite(rms_map) & (rms_map > 0)
-
-     #print(f"bkg array {bkg.background}")
+     # print(f"bkg array {bkg.background}")
      bkg_rms = np.nanmedian(rms_map[valid_rms]) if np.any(valid_rms) else np.nan
      bkg_mean = np.nanmean(np.asarray(bkg.background, dtype=float)[~coverage_mask])
-     print(f"Mean background: {bkg_mean}")
-     print(f"Background rms: {bkg_rms}")
-     print(f"Subtracting background...")
-     
+
+     # print(f"bkg array {bkg.background}")
+     if image_path is not None:
+          background_path = _background_filename_for(image_path)
+          out_header = header.copy() if header is not None else fits.Header()
+          hdu = fits.PrimaryHDU(data=np.asarray(bkg.background, dtype=float), header=out_header)
+          hdu.writeto(background_path, overwrite=True)
+          print(f"Saved background map to {background_path}")
 
      # threshold_img = snr_threshold * bkg.background_rms
      img_sub = img - bkg.background
-     print(f"Background subtraction complete.")
 
      if doplot:
           # Plot the image, background, and background-subtracted image
           fig, ax = plt.subplots(1, 3, figsize=(18, 6))
-          norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
-                                vmax=np.nanpercentile(img, 99.99), 
+          norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00),
+                                vmax=np.nanpercentile(img, 99.99),
                                 stretch=LogStretch())
           ax[0].imshow(img, origin='lower', cmap='inferno', norm=norm)
           ax[0].set_title(f"{gal.upper()} {band.upper()} mosaic")
           # TODO: gal and band as global properties
           ax[1].imshow(bkg.background, origin='lower', cmap='inferno')
-          ax[1].set_title(f"Estimated background")
-          norm_sub = ImageNormalize(vmin=np.nanpercentile(img_sub, 25.00), 
-                                    vmax=np.nanpercentile(img_sub, 99.99), 
+          ax[1].set_title("Estimated background")
+          img_sub = img - bkg.background
+          norm_sub = ImageNormalize(vmin=np.nanpercentile(img_sub, 25.00),
+                                    vmax=np.nanpercentile(img_sub, 99.99),
                                     stretch=LogStretch())
           ax[2].imshow(img_sub, origin='lower', cmap='inferno', norm=norm_sub)
-          ax[2].set_title(f"Background-subtracted image")
-          # Add colourbars
+          ax[2].set_title("Background-subtracted image")
           for a in ax:
                im = a.images[0]
                plt.colorbar(im, ax=a, pad=0.01, fraction=0.05)
-          plt.savefig(out_dir+f"/{gal}_{band}_background_subtraction.png", dpi=300)
+          plt.savefig(out_dir + f"/{gal}_{band}_background_subtraction.png", dpi=300)
           plt.close(fig)
 
-     return img_sub, bkg_mean, bkg_rms, bkg
+     print(f"Mean background: {bkg_mean}")
+     print(f"Background rms: {bkg_rms}")
+     return bkg.background, bkg_mean, bkg_rms
+
+
+def subtract_bkg(image_path,
+          gal=None,
+          band=None,
+          box_size_pix=50,
+          filter_size_pix=3,
+          bkg_estimator=MedianBackground(),
+          coverage_mask=False,
+          doplot=True,
+          sigma_to_clip_bkg=3.0,
+          maxiters_for_bkg_clip=5,
+          **kwargs):
+     """Create a cached background FITS file if needed and subtract it from the image."""
+     background_path = _background_filename_for(image_path)
+
+     if not os.path.exists(background_path):
+          print(f"Background file not found for {image_path}. Calculating background...")
+          img, err, snr_map, coverage_mask, header = open_jwst(image_path)
+          calculate_bkg(
+               img=img,
+               gal=gal,
+               band=band,
+               box_size_pix=box_size_pix,
+               filter_size_pix=filter_size_pix,
+               bkg_estimator=bkg_estimator,
+               coverage_mask=coverage_mask,
+               doplot=doplot,
+               sigma_to_clip_bkg=sigma_to_clip_bkg,
+               maxiters_for_bkg_clip=maxiters_for_bkg_clip,
+               image_path=image_path,
+               header=header,
+               **kwargs,
+          )
+     else:
+          print(f"Background file found on disk for {image_path}.")
+
+     img, err, snr_map, coverage_mask, header = open_jwst(image_path)
+     bkg_background = fits.getdata(background_path)
+     bkg_mean = np.nanmean(bkg_background)
+     bkg_rms = np.nanstd(bkg_background)
+     img_sub = img - bkg_background
+     return img_sub, bkg_mean, bkg_rms, bkg_background
 
 
 # ------------------------------------------------
@@ -381,7 +434,7 @@ def run_source_finder(img,
                       gal,
                       band,
           header, 
-          bkg,
+          bkg_rms,
           finder='iraf', 
           snr_threshold=3.0, 
           fwhm=2.0, 
@@ -412,7 +465,7 @@ def run_source_finder(img,
      print(f"Running source finder: {finder}")
      
      # Get the threshold image from the background calculation
-     ths = snr_threshold * bkg.background_rms
+     ths = snr_threshold * bkg_rms
 
      # Add option to import an external source catalog
      # instead of running a source finder. Useful for testing 
@@ -476,13 +529,14 @@ def run_source_finder(img,
 
      #convert from x,y in the image to  sky coordinates   
      #----------------------------------------
-     sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=WCS(header)) 
-     sources['ra']=sk.ra
-     sources['dec']=sk.dec
-
-     #convert from x,y in the image to  sky coordinates   
-     #----------------------------------------
-     sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=WCS(header)) 
+     with warnings.catch_warnings():
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*OBSGEO.*",
+               category=FITSFixedWarning,
+          )
+          wcs_obj = WCS(header)
+     sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=wcs_obj)
      sources['ra']=sk.ra
      sources['dec']=sk.dec
 
@@ -498,10 +552,20 @@ def run_source_finder(img,
           im = ax.images[0]
           plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
           plt.savefig(out_dir+f"/{gal}_{band}_source_finder_{finder}.png", dpi=300)
+          # zoom in on a region
+          x0=np.mean(plt.xlim())
+          y0=np.mean(plt.ylim())
+          zoom_size = 100  # size of the zoomed-in region in pixels
+          ax.set_xlim(x0 - zoom_size/2, x0 + zoom_size/2)
+          ax.set_ylim(y0 - zoom_size/2, y0 + zoom_size/2)
+          ax.set_title(f"{gal.upper()} {band.upper()} mosaic, S/N threshold = {snr_threshold}")
+          ax.scatter(sources['xcentroid'], sources['ycentroid'], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.8)
+          plt.savefig(out_dir+f"/{gal}_{band}_source_finder_{finder}_zoom.png", dpi=300)
           plt.close(fig)
 
+
      print(f"Found {len(sources)} sources")
-     print(sources.colnames)
+     # print(sources.colnames)
 
      if write:
           if "find_cat_filename" in kwargs:
@@ -1092,11 +1156,17 @@ def fit_and_subtract(infile, # input mosaic image
      #---------------------------------------------
      # set up input image
  
-     inhdu=fits.open(infile)[whathdu]
-     inwcs=wcs.WCS(inhdu.header)
-     pixsize=wcs.utils.proj_plane_pixel_scales(inwcs)*3600
+     with warnings.catch_warnings():
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*OBSGEO.*",
+               category=FITSFixedWarning,
+          )
+          inhdu = fits.open(infile)[whathdu]
+          inwcs = wcs.WCS(inhdu.header)
+     pixsize = wcs.utils.proj_plane_pixel_scales(inwcs) * 3600
      # if this image has been moved to a larger distance, then pix is too large
-     pixsize/=pixbinfactor
+     pixsize /= pixbinfactor
      
      # Sr  per pixel
      srperpix=(pixsize[0]/206265)**2
@@ -1679,6 +1749,7 @@ filter_fwhm = {
     'F277W': 1.460,
     'F300M': 1.587,
     'F335M': 1.762,
+    'CONVOLVED_PAH_F360M': 1.905,
     'F360M': 1.905,
     'PAH33': 4.44,
     'F405N': 2.159,
@@ -1735,7 +1806,8 @@ def do_photometry(
      for gal in targets:
           # loop through the filters for this galaxy
           for band in bands:
-               print(f"Processing {gal} at {band}...")
+               print("-----------------------------------------")
+               print(f">>> Processing {gal} at {band}...")
 
                # Get the full path to the data
                datafile = get_file(
@@ -1757,6 +1829,8 @@ def do_photometry(
                # TODO get distance from the galaxy sample table intead of the config file
                # Subtract background 
                if 'subtract_bkg' in steps:
+                    print()
+                    print(f"Subtracting background for {gal} at {band}...")
                     if 'box_size_pix' not in conf['parameters']['bkg_subtract']:
                          # Convert box size from pc to pixels using the pixel scale from the header
                          pix_scale = get_pixarea_in_sr(header) ** 0.5 * (180/np.pi) * 3600  # arcsec/pixel
@@ -1772,17 +1846,19 @@ def do_photometry(
                          conf['parameters']['bkg_subtract']['filter_size_pix'] = filter_size_pix
 
                     img_sub, bkg_mean, bkg_rms, bkg_background = subtract_bkg(
-                         img=img, 
+                         image_path=datafile,
                          gal=gal,
                          band=band,
                          **conf['parameters']['bkg_subtract'],
                     )
-
-               if 'subtract_bkg' in steps:
                     use_image = img_sub
                else:
+                    # bkg_rms is passed to the source finder even if background subtraction is not performed
+                    # so we need a different rms estimate;  TODO: implement a proper background RMS estimation for non-subtracted images
+                    # For now, we use the standard deviation of the image as a rough estimate of the background RMS
+                    bkg_rms = np.nanstd(img)
                     use_image = img
-
+               
                # Load the filename from the config
                if "find_cat_filename" in conf['parameters']['source_find']:
                     cat_filename = conf['parameters']['source_find']['find_cat_filename']
@@ -1791,18 +1867,20 @@ def do_photometry(
 
                if 'source_find' in steps:
                     # Get sources using the source finder
-
+                    print()
+                    print(f"Finding sources for {gal} at {band}...")
                     sources = run_source_finder(
                          img=use_image, 
                          gal=gal,
                          band=band,
                          header=header, 
-                         bkg=bkg_background, 
+                         bkg_rms=bkg_rms, 
                          **conf['parameters']['source_find'],
                     )
                
                else:
-                    print("Importing sources from existing catalog...")
+                    print()
+                    print(f"Importing sources from existing catalog for {gal} at {band}...")
                     # Load the existing source catalog
                     sources = Table.read(cat_path + cat_filename)
                     print(f"Loaded {len(sources)} sources from {cat_path + cat_filename}")
@@ -1850,11 +1928,12 @@ def do_photometry(
                     )
                else:
                     r_opt = filter_fwhm[band.upper()]*2.5 if use_filter_fwhm else conf['parameters']['photometry']['aperture_radius']
-                    print(f"Using fixed aperture radius of {r_opt} pixels for photometry.")
+                    if 'aperture_photometry' in steps:
+                         print(f"Using fixed aperture radius of {r_opt} pixels for photometry.")
 
                # Update the fwhm according to the filter if use_filter_fwhm is True.
                # If use_filter_fwhm is False, stay at specified value.
-               if use_filter_fwhm:
+               if use_filter_fwhm and 'aperture_photometry' in steps:
                     try:
                          fwhm = filter_fwhm[band.upper()]
                          print(f"Using FWHM of {fwhm} pixels for source detection based on JWST PSF for {band.upper()}.")
@@ -1882,6 +1961,7 @@ def do_photometry(
 
                # Perform photometry with circular apertures
                if 'aperture_photometry' in steps:
+                    print()
                     print(f"Performing photometry on {len(sources)} sources with aperture radius of {r_opt} pixels.")
                     apertures, catalog = compute_photometry(
                          # TODO this is important: do we want to use the background-subtracted image or the original image for this step?
@@ -1907,6 +1987,7 @@ def do_photometry(
                     catalogs[gal][band] = catalog
 
                if "residual" in steps:
+                    print()
                     print(f"Computing residual image for {gal} at {band}...")
                     fit_and_subtract(
                          datafile,
