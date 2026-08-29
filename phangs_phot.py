@@ -542,7 +542,7 @@ def run_source_finder(img,
 
      if doplot:
           # Plot the image with sources 
-          fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+          fig, ax = plt.subplots(1, 1, figsize=(8, 8))
           norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
                                 vmax=np.nanpercentile(img, 99.99), 
                                 stretch=LogStretch())
@@ -711,11 +711,13 @@ def compute_photometry(data,
           print(f"Using aperture correction factor of {apcorr} for radius {radius} pixels.")
 
      # Do aperture photometry
-     print(f"Doing aperture photometry...")
+     print()
+     print(f"Doing aperture photometry for {len(sources)} sources...")
      positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
      apertures = CircularAperture(positions, r=radius)
      aper_stats = ApertureStats(data, apertures, error=err)
      phot_full = aperture_photometry(data, apertures, error=err, method=phot_method) # Jimena also passed a mask - why?
+     phot_full['aperture_min'] = np.asarray(aper_stats.min)
 
      # Annulus
      annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
@@ -760,7 +762,13 @@ def compute_photometry(data,
           phot_full['peak'] = np.asarray(sources['peak_value'])   # TODO change peakfinder output to have peak instead of peak_value
 
      # Include ra, dec
-     wcs = WCS(header)
+     with warnings.catch_warnings():
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*OBSGEO.*",
+               category=FITSFixedWarning,
+          )
+          wcs = WCS(header)
      ra, dec = wcs.all_pix2world(phot_full["xcenter"], phot_full["ycenter"], 0)
      phot_full["ra"] = ra
      phot_full["dec"] = dec
@@ -791,18 +799,26 @@ def compute_photometry(data,
           print(f"Band {band} not recognized for error calculation. Setting total_aperture_sum_err to max possible, sqrt(aperture_sum_err**2 + bkg_err**2).")
           phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2)
 
+     # special step for the continuum subtracted PAH bands to filter some of the poor subtractions:
+     if "pah" in band.lower():
+          negative_threshold = -1
+          z_neg = np.where(phot_full['aperture_min'] < negative_threshold)[0]
+          phot_full['aperture_sum_err'][z_neg] *= 3
+          if len(z_neg) > 0:
+               print(f"Found {len(z_neg)} sources with aperture_min < {negative_threshold}. Increased their aperture_sum_err by a factor of 3.")
+
+
      # Add the errors
      phot_full['bkg_err_mJy'] = np.asarray(bkg_err_mJy)
      phot_full['poisson_err_mJy'] = np.asarray(phot_full['aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
      phot_full['tot_err_mJy'] = np.asarray(phot_full['total_aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
-
  
      # Sort by aperture flux
      phot_full.sort("aperture_sum")
      phot_full.reverse()
 
      # Print the column names of the photometry table
-     print(phot_full.colnames)
+     # print(phot_full.colnames)
 
      # Write the catalog if requested
      if write:
@@ -825,16 +841,38 @@ def compute_photometry(data,
           plt.close(fig)
 
           # Plot the image with significant sources 
-          fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+          fig, ax = plt.subplots(1, 1, figsize=(8, 8))
           norm = ImageNormalize(vmin=np.nanpercentile(data, 25.00), 
                                 vmax=np.nanpercentile(data, 99.99), 
                                 stretch=LogStretch())
           ax.imshow(data, origin='lower', cmap='inferno', norm=norm)
           ax.set_title(f"{gal.upper()} {band.upper()}")
-          z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>50)[0]
-          ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
-          z=np.where(phot_full['aperture_flux_mJy']/phot_full['tot_err_mJy']>30)[0]
-          ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=30, marker='*',edgecolor='white', facecolor='none', lw=0.5, alpha=0.7,label="Total SNR>3")
+          # z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
+          # ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
+          label_low_snr_values = True  # Set to True to label each red low-SNR source with its SNR value
+          err_threshold = 1
+          snr = phot_full['aperture_flux_mJy'] / phot_full['tot_err_mJy']
+          hi_label_added = False
+          lo_label_added = False
+          for idx in range(len(phot_full)):
+               x = phot_full['xcenter'][idx]
+               y = phot_full['ycenter'][idx]
+               linewidth = 1
+               alpha = 0.7     
+               if snr[idx] > err_threshold:
+                    edgecolor = 'k'
+                    label = None if hi_label_added else f"SNR > {err_threshold}"
+                    hi_label_added = True
+               elif snr[idx] >0:
+                    edgecolor = 'g'
+                    label = None if lo_label_added else f"SNR < {err_threshold}"
+                    lo_label_added = True
+               else:
+                    continue
+               circ = plt.Circle((x, y), radius=radius, fill=False, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha, label=label)
+               ax.add_patch(circ)
+               if snr[idx] < err_threshold and label_low_snr_values:
+                    ax.text(x + radius * 1.2, y + radius * 1.2, f"{snr[idx]:.1f}", color='g', fontsize=8, ha='left', va='bottom')
           ax.legend(loc="best",prop={"size":8})
           im = ax.images[0]
           plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
@@ -1979,11 +2017,11 @@ def do_photometry(
                          **conf['parameters']['photometry']
                     )
 
-                    print(f"Photometry complete. Catalog has {len(catalog)} sources.")
+                    # print(f"Photometry complete. Catalog has {len(catalog)} sources.")
 
                     # Store the catalog in the catalogs dict
-                    print(catalog)
-                    print(catalog.colnames)
+                    # print(catalog)
+                    # print(catalog.colnames)
                     catalogs[gal][band] = catalog
 
                if "residual" in steps:
