@@ -638,7 +638,7 @@ def compute_photometry(data,
 
      if use_brightest is not False:
           # Aperture photometry of only brightest sources
-          sources = sources[np.argsort(sources['flux'])[-use_brightest:]]
+          sources = sources[np.argsort(sources['peak_value'])[-use_brightest:]]
           print(f"using only {len(sources)} sources")
 
      if apcorr_step:
@@ -767,9 +767,9 @@ def compute_photometry(data,
                                 stretch=LogStretch())
           ax.imshow(data, origin='lower', cmap='inferno', norm=norm)
           ax.set_title(f"{gal.upper()} {band.upper()}")
-          z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
+          z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>50)[0]
           ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
-          z=np.where(phot_full['aperture_flux_mJy']/phot_full['tot_err_mJy']>3)[0]
+          z=np.where(phot_full['aperture_flux_mJy']/phot_full['tot_err_mJy']>30)[0]
           ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=30, marker='*',edgecolor='white', facecolor='none', lw=0.5, alpha=0.7,label="Total SNR>3")
           ax.legend(loc="best",prop={"size":8})
           im = ax.images[0]
@@ -1910,8 +1910,8 @@ def do_photometry(
                     print(f"Computing residual image for {gal} at {band}...")
                     fit_and_subtract(
                          datafile,
-                         band="pah33",
-                         wave=10.0, # wavelength in microns TODO get from band?
+                         band=band,
+                         wave=3.35, # wavelength in microns TODO get from band?
                          srcfile=local['out_dir']+cat_filename, # source catalog to use for fitting 
                          file_root=local['out_dir']+"psffit",
                          pixbinfactor=1.,
