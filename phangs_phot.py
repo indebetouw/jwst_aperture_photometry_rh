@@ -70,6 +70,24 @@ finder_params = conf['parameters']['source_find']
 phot_params = conf['parameters']['photometry']
 
 
+def load_filter_data(csv_path=None):
+     """Load empirical filter metadata from an external CSV file."""
+     if csv_path is None:
+          csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filter_data.csv")
+
+     table = Table.read(csv_path, format="ascii.csv", comment="#")
+     fwhm = {}
+     wave = {}
+     for row in table:
+          filter_name = str(row['filter_name']).strip()
+          fwhm[filter_name] = float(row['empirical_fwhm'])
+          wave[filter_name] = float(row['central_wave'])
+     return fwhm, wave
+
+
+filter_fwhm, filter_wave = load_filter_data()
+
+
 # ------------------------------------------------
 # Conversions and file management
 # ------------------------------------------------
@@ -850,7 +868,7 @@ def compute_photometry(data,
           # z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
           # ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
           label_low_snr_values = True  # Set to True to label each red low-SNR source with its SNR value
-          err_threshold = 1
+          err_threshold = 1.5
           snr = phot_full['aperture_flux_mJy'] / phot_full['tot_err_mJy']
           hi_label_added = False
           lo_label_added = False
@@ -863,7 +881,7 @@ def compute_photometry(data,
                     edgecolor = 'k'
                     label = None if hi_label_added else f"SNR > {err_threshold}"
                     hi_label_added = True
-               elif snr[idx] >0:
+               elif snr[idx] >0 and phot_full['aperture_flux_mJy'][idx]/phot_full['poisson_err_mJy'][idx]>5:
                     edgecolor = 'g'
                     label = None if lo_label_added else f"SNR < {err_threshold}"
                     lo_label_added = True
@@ -872,7 +890,9 @@ def compute_photometry(data,
                circ = plt.Circle((x, y), radius=radius, fill=False, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha, label=label)
                ax.add_patch(circ)
                if snr[idx] < err_threshold and label_low_snr_values:
-                    ax.text(x + radius * 1.2, y + radius * 1.2, f"{snr[idx]:.1f}", color='g', fontsize=8, ha='left', va='bottom')
+                    #ax.text(x + radius * 1.2, y + radius * 1.2, f"{snr[idx]:.1f}", color='g', fontsize=8, ha='left', va='bottom')
+                    ax.text(x + radius * 1.2, y + radius * 1.2, f"{phot_full['aperture_flux_mJy'][idx]/phot_full['poisson_err_mJy'][idx]:.1f}", color='g', fontsize=8, ha='left', va='bottom')
+                    
           ax.legend(loc="best",prop={"size":8})
           im = ax.images[0]
           plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
@@ -884,6 +904,10 @@ def compute_photometry(data,
      return apertures, phot_full
 
 
+
+
+
+#=====================================================================================
 def bkg_error_quantiles(data, annulus_masks, sigma=3.0):
      """Compute local background statistics in the annulus around each source.
      Args:
@@ -926,6 +950,9 @@ def bkg_error_quantiles(data, annulus_masks, sigma=3.0):
                     
 
 
+
+
+#=====================================================================================
 def get_apcorr_params(crds_dir, band, inst, eefraction_value=0.8, apcorr_method='crds'):
      """Get the aperture correction parameters from the CRDS apcorr file for a given filter and eefraction.
      Args:
@@ -1054,10 +1081,9 @@ def get_psf_file(band):
 
 
 
-
-# this is the fitting function that returns the residual image clip 
+#=====================================================================================
+# Take an image clip and return the residual after subtracting the model
 def residual(params,imclip,onlyfitted,psfcore,scor0,sclip,njparams):
-     # special function params['onlyfitted'] to return the subtracted image clip for creating the residual image
      # params = [fluxes,jtypes] # jtypes could be fixed
      fparms=[x for x in params.keys() if x[0]=='f']
 
@@ -1155,10 +1181,9 @@ def residual(params,imclip,onlyfitted,psfcore,scor0,sclip,njparams):
 
 
 
-
+#=====================================================================================
 def fit_and_subtract(infile, # input mosaic image 
                     band="pah33",
-                    wave=10.0, # wavelength in microns TODO get from band?
                     whathdu='SCI', # which HDU to use for the image - TODO refactor into open_jwst
                     srcfile=None, # source catalog to use for fitting 
                     file_root="psffit",
@@ -1174,6 +1199,9 @@ def fit_and_subtract(infile, # input mosaic image
                     d=0.01 # size of region to fit in degrees
                     ):
 
+     from lmfit import minimize, Parameters, create_params
+
+
      maxfluxfactor=4 # limit on how much brighter the source can get when fit
     
      # rotational angle miri is V3 +~5
@@ -1184,7 +1212,7 @@ def fit_and_subtract(infile, # input mosaic image
      sncut=0.5 # filter for only sources with aperture SN>0.5
      froot = file_root
      fiteverything=True # if False, only fit crowded sources
-     plotborder=0 # fraction of sclip to add in plotting border in region         
+     plotborder=0 # fraction of sclip to include around the border when displaying the region
      alpha=0.5 # for overplotting sources
      larger_sclip=True
      tomjy=1.0 # convert from input catalog units to mJy 
@@ -1192,8 +1220,7 @@ def fit_and_subtract(infile, # input mosaic image
 
      
      #---------------------------------------------
-     # set up input image
- 
+     # load input image
      with warnings.catch_warnings():
           warnings.filterwarnings(
                "ignore",
@@ -1202,24 +1229,31 @@ def fit_and_subtract(infile, # input mosaic image
           )
           inhdu = fits.open(infile)[whathdu]
           inwcs = wcs.WCS(inhdu.header)
+
+     # pixel scale in arcsec/pixel
      pixsize = wcs.utils.proj_plane_pixel_scales(inwcs) * 3600
-     # if this image has been moved to a larger distance, then pix is too large
+     # if this is a simulated image moved to a larger distance, then the pixels are artificially large
+     # because the simulated images have large pixels in the WCS, so that the coordinates of sources
+     # match the original nearby image. If you're not doing simulated images, pixbinfactor should be 1.
      pixsize /= pixbinfactor
      
-     # Sr  per pixel
+     # Sr per pixel, used to convert between mJy flux density and MJy/Sr peak value
      srperpix=(pixsize[0]/206265)**2
-     
-     # TODO replace with lookup table values
-     fwhm=wave/6.5e6*206265
 
+     fwhm=filter_fwhm[band.upper()]
+     wave=filter_wave[band.upper()]
+
+
+     # there are several radii and clip image sizes used here
+     # first is rpix, the radius in pixels used for ds9 and plotting
      # position of first null = 2.37*HWHM
      fnull=2.37*fwhm/2
      rpix=fnull/pixsize[0] # for ds9 file and overplots
-     
+     # radii related to psf-fitting are defined below.
      
      
      #---------------------------------------------
-     # set up input source list
+     # read in input source list
      srclist=Table.read(srcfile,format="ascii")
      
      # order from brightest to faintest
@@ -1232,9 +1266,8 @@ def fit_and_subtract(infile, # input mosaic image
      srcde=srclist[kde].data
      
      
-     
      #---------------------------------------------
-     # set up psfs - expects 4 x oversampled psf
+     # set up psfs - expects 4 x oversampled psf in the file
      psffile = get_psf_file(band)
 
      psfdat=fits.getdata(psffile)
@@ -1242,19 +1275,17 @@ def fit_and_subtract(infile, # input mosaic image
      #DET_SAMP=                    4 / Oversampling factor for MFT to detector plane
      #PIXELSCL=               0.0277 / Scale in arcsec/pix (after oversampling)
      
-     # make 16 full-pixel psfs, shifted by subpixel amounts, and broadened by these quarter-pixel amounts:
-     widths=np.array([1,5,9])  # TODO does this have to be different for diff bands?
-     widths=np.int32(np.round(np.array([0,4,8])*wave/21))+1 # quick scaling - really needs to use psfsize
+     # make psfs broadened by "widths" quarter-pixel amounts:
+     widths=np.int32(np.round(np.array([0,4,8])*wave/21))+1 # scale by wavelength
      # force broader - doesn't really do much
-     widths=[1,2,4]
-     #widths+=1
-     
+     widths=[1,2,4]     
      nbroad=len(widths)
      
      s=psfdat.shape
-     p=np.zeros([nbroad,s[0],s[1]]) # broadened psfs, quarter-pix resolution (bin in residual() now)
+     # this "p" array will store broadened psfs, at quarter-pix resolution
+     p=np.zeros([nbroad,s[0],s[1]]) 
      
-     # ROTATE psf        
+     # ROTATE psf to the correct position angle
      psfdat=rotate(psfdat,-inhdu.header['pa_aper'],reshape=False)
      
      for k in range(nbroad):
@@ -1275,24 +1306,27 @@ def fit_and_subtract(infile, # input mosaic image
      
      # keep track of any sources that get their fluxes adjusted by fitting
      fitted=np.zeros(nsrc)
-     # and the j parameter (width)
+     # and the fitted j parameter (width)
      jout=np.zeros(nsrc)
+     # and fitted xy position
      xyout=np.zeros([nsrc,2])
-     # nearest distance
+     # distance to the nearest source
      nearest=np.zeros(nsrc)
-     # floor level
+     # fitted local background/ floor level
      bgfit=np.zeros(nsrc)
-     
+
+     # the new fitted flux (will be filled during fitting)
      newflux=srclist[kflux].data.copy()
-     from lmfit import minimize, Parameters, create_params
      
-     # what is the core radius?  arguably 1 FWHM, maybe first null? do 2*FWHM:
+     # what is distance of proximity that sources have to be fit together?
+     # use 2*fwhm
      rfit=fwhm*2/3600
      
      # for F2100 I did 70:111 i.e. a half-width of 6.7*FWHM or 2.7*first null
      # npixrcore=int(round(7*fwhm/2/pixsize[0]*4)) # quarter-pixels
      # that seems a bit much for other bands
-     npixrcore=int(round(6*fwhm/2/pixsize[0]/2))*8 # quarter-pixels, multiple of 8
+     npixrcore=int(round(6*fwhm/2/pixsize[0]/2))*8 # quarter-pixels, multiple of 
+     # scor is npixrcore*2 - these define the size of the core psf used for fitting
      
      spsf=psfdat.shape[0]//2 # this is even - psf is centered between pixels 
      icore=[spsf-npixrcore,spsf+npixrcore]
@@ -1304,7 +1338,8 @@ def fit_and_subtract(infile, # input mosaic image
      # psfcore is centered at 39.5,39.5 = scor/2-0.5
      degperpix=pixsize[0]/3600
      
-     # clipped subimage to actually fit, in full pixels units, 1.5xcore psf size?
+     # clip the subimage to something large enough to fit in full pixels units, 
+     # 1.5xcore psf size
      sclip=np.int32(np.round(scor0*1.5/2))*2
      window=(sclip[0]//2)*degperpix # exactly equal to clip size - find everyting in the clip
      
@@ -1773,30 +1808,8 @@ def cross_match_catalogs(dir, filter, galaxy, phot_full, cat_image3):
 
 
 
-
-
-# Empirical filter FWHM in pixels  
-# NIRCAM from https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-performance/nircam-point-spread-functions#gsc.tab=0
-# MIRI from https://jwst-docs.stsci.edu/jwst-mid-infrared-instrument/miri-performance/miri-point-spread-functions#gsc.tab=0
-filter_fwhm = {
-    'F150W': 1.613,
-    'F164N': 1.806,
-    'F187N': 2.065,
-    'F200W': 2.129,
-    'F212N': 2.323,
-    'F277W': 1.460,
-    'F300M': 1.587,
-    'F335M': 1.762,
-    'CONVOLVED_PAH_F360M': 1.905,
-    'F360M': 1.905,
-    'PAH33': 4.44,
-    'F405N': 2.159,
-    'F444W': 2.302,
-    'F770W': 2.445,
-    'F1000W': 2.982,
-    'F1130W': 3.409,
-    'F2100W': 6.127,
-}
+#=====================================================================================
+# MAIN 
 
 # Directories
 jwst_dir = local['jwst_dir']
@@ -1965,7 +1978,8 @@ def do_photometry(
                          **conf['parameters']['r_opt']
                     )
                else:
-                    r_opt = filter_fwhm[band.upper()]*2.5 if use_filter_fwhm else conf['parameters']['photometry']['aperture_radius']
+                    fwhm2rad = conf['parameters']['photometry'].get('fwhm2rad', 2.5)
+                    r_opt = filter_fwhm[band.upper()] * fwhm2rad if use_filter_fwhm else conf['parameters']['photometry']['aperture_radius']
                     if 'aperture_photometry' in steps:
                          print(f"Using fixed aperture radius of {r_opt} pixels for photometry.")
 
@@ -2023,6 +2037,13 @@ def do_photometry(
                     # print(catalog)
                     # print(catalog.colnames)
                     catalogs[gal][band] = catalog
+               else:
+                    phot_cat_path = os.path.join(local['out_dir'], cat_filename)
+                    if os.path.exists(phot_cat_path):
+                         catalogs[gal][band] = Table.read(phot_cat_path)
+                         print(f"Loaded photometry catalog from {phot_cat_path}")
+                    else:
+                         print(f"Warning: aperture_photometry not requested and photometry catalog not found at {phot_cat_path}.")
 
                if "residual" in steps:
                     print()
@@ -2030,7 +2051,6 @@ def do_photometry(
                     fit_and_subtract(
                          datafile,
                          band=band,
-                         wave=3.35, # wavelength in microns TODO get from band?
                          srcfile=local['out_dir']+cat_filename, # source catalog to use for fitting 
                          file_root=local['out_dir']+"psffit",
                          pixbinfactor=1.,
