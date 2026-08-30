@@ -1,6 +1,6 @@
 # NIRCAM pivot wavelengths from https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-performance/nircam-point-spread-functions
 # MIRI average wavelengths from https://jwst-docs.stsci.edu/jwst-mid-infrared-instrument/miri-performance/miri-point-spread-functions
-filter_name,empirical_fwhm,central_wave
+filter_name,empirical_fwhm_pix,central_wave
 F150W,1.613,1.501
 F164N,1.806,1.644
 F187N,2.065,1.874
