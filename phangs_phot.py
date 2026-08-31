@@ -1192,7 +1192,64 @@ def residual(params,imclip,return_type,psfcore,scor_pix,sfitrgn_pix,njparams):
      else:
           return outclip
 
- 
+
+
+
+
+#=====================================================================================
+def get_apcor_from_psf(band,r_ap,r_sky_in,r_sky_out):
+     """
+     Get aperture correction from PSF for a given band and aperture parameters.
+
+     Parameters
+     ----------
+     band : str
+         The band of the observation.
+     r_ap : array-like
+         Aperture radii
+     r_sky_in : array-like
+         Inner radii of the sky annulus.
+     r_sky_out : array-like
+         Outer radii of the sky annulus.
+
+     Returns
+     -------
+     apcor : array-like 
+         Aperture correction factors for each set of aperture parameters.
+     """
+     apcor = np.zeros_like(r_ap, dtype=float)
+
+     # Find the PSF file for this band and load the oversampled PSF image.
+     psf_file = get_psf_file(band)
+     psf_data = fits.getdata(psf_file)
+
+     # Operate in oversampled (quarter-pixel) coordinates.
+     r_ap = np.asarray(r_ap, dtype=float)
+     r_sky_in = np.asarray(r_sky_in, dtype=float)
+     r_sky_out = np.asarray(r_sky_out, dtype=float)
+     r_ap, r_sky_in, r_sky_out = np.broadcast_arrays(r_ap, r_sky_in, r_sky_out)
+
+     y0 = (psf_data.shape[0] - 1) / 2.0
+     x0 = (psf_data.shape[1] - 1) / 2.0
+     pos = [(x0, y0)]
+
+     psf_sum_ap = np.zeros(r_ap.shape, dtype=float)
+     psf_mean_ann = np.zeros(r_ap.shape, dtype=float)
+     npix_ap = np.zeros(r_ap.shape, dtype=float)
+     npix_ann = np.zeros(r_ap.shape, dtype=float)
+
+     for i in np.ndindex(r_ap.shape):
+          aper = CircularAperture(pos, r=4.0 * r_ap[i])
+          ann = CircularAnnulus(pos, r_in=4.0 * r_sky_in[i], r_out=4.0 * r_sky_out[i])
+          ap_phot = aperture_photometry(psf_data, aper, method='exact')
+          ann_phot = aperture_photometry(psf_data, ann, method='exact')
+
+          npix_ap[i] = float(aper.area)
+          npix_ann[i] = float(ann.area)
+          psf_sum_ap[i] = float(ap_phot['aperture_sum'][0])
+          psf_mean_ann[i] = float(ann_phot['aperture_sum'][0]) / npix_ann[i]
+
+     return np.nansum(psf_data) / ( psf_sum_ap - psf_mean_ann * npix_ap )
 
 
 
