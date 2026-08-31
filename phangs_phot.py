@@ -6,20 +6,26 @@
 import fnmatch
 import glob
 import numpy as np
+import math
 import matplotlib.pyplot as plt
 import tomllib
 import os
+import pdb
+import warnings
 from sys import exit
 from scipy.spatial import cKDTree
 
 import astropy.units as u
 from astropy import wcs
-from astropy.wcs import WCS
+from astropy.wcs import WCS, FITSFixedWarning
 from astropy.io import fits
 from astropy.stats import SigmaClip
 from astropy.table import Table, join, hstack
 from astropy.coordinates import SkyCoord, match_coordinates_sky
 from astropy.visualization import ImageNormalize, LogStretch
+from scipy.ndimage import gaussian_filter as gf
+from scipy.ndimage import rotate
+
 
 # Photutils imports
 from photutils.background import Background2D, MedianBackground, SExtractorBackground
@@ -64,37 +70,72 @@ finder_params = conf['parameters']['source_find']
 phot_params = conf['parameters']['photometry']
 
 
+def load_filter_data(csv_path=None):
+     """Load empirical filter metadata from an external CSV file."""
+     if csv_path is None:
+          csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filter_data.csv")
+
+     table = Table.read(csv_path, format="ascii.csv", comment="#")
+     fwhm = {}
+     wave = {}
+     for row in table:
+          filter_name = str(row['filter_name']).strip()
+          fwhm[filter_name] = float(row['empirical_fwhm_pix'])
+          wave[filter_name] = float(row['central_wave'])
+     return fwhm, wave
+
+
+filter_fwhm_pix, filter_wave = load_filter_data()
+
+
 # ------------------------------------------------
 # Conversions and file management
 # ------------------------------------------------
-def get_path_to_file(wdir, version, project, galaxy, ptype, filter):
-     """Get the path to the data file based on the version, project, galaxy, product type, and filter.
+def get_file(wdir, version, project, galaxy, ptype, filter):
+     """Get the data file with full path based on the version, project, galaxy, product type, and filter.
      Args:
+          wdir: root of working directory
           version: version of the data (e.g., v4p1)
           project: JWST PID (e.g., 4793)
           galaxy: galaxy name 
           ptype: product type (e.g., images (for anchored), features, psfmatch, etc.)
           filter: filter name."""
-     # TODO: Add functionality for files not in the release directory
+
+     # start in release directory structure, then broaden
      path = f"{wdir}{version}/{project}/release/{galaxy}/{ptype}/"
 
-     # Check that the path exists
-     if os.path.exists(path):
-          print(f"Found directory for {galaxy} {filter} in {path}")
+     # TODO implement better fallbacks starting with mosaic_ext (default anchored) and then falling back to i2d or types
+     print(f"Searching in {path} for {filter} data, with extension: {ptype}")
+     files = glob.glob(path + f"*{filter.lower()}*{ptype}*")
+     if len(files) > 1:
+          print(f"Warning: Multiple files found for {filter} in {path}. Using the first one.")
+          print(f"Files found: {files}")
+          return(files[0])
+     elif len(files) == 1:
+          print(f"Found file for {filter} in {path}: {files[0]}")
+          return(files[0])
      else:
+          print(f"No files found for {filter} in {path}. Trying a broader search...")
+
           # look for plausible files in the directory and print a warning if we find any, but raise an error if we don't find any
           plausible_files = []
           for root, dirnames, filenames in os.walk(wdir + version + "/"):
                for f in fnmatch.filter(filenames, '*.fits'):
-                    if galaxy.lower() in f.lower() and ptype.lower() in f.lower() and filter.lower() in f.lower():
-                        plausible_files.append(os.path.join(root, f))
+                    if galaxy.lower() in f.lower() and \
+                         ptype.lower() in f.lower() and \
+                         filter.lower() in f.lower() and \
+                         "resid" not in f.lower() and \
+                         "background" not in f.lower() and \
+                         "model" not in f.lower():
+                         plausible_files.append(os.path.join(root, f))
 
-          if len(plausible_files) > 0:
-               print(f"Warning: No file found for {galaxy} {filter} in release {path}, so using this plausible file: {plausible_files[0]}.")
-               path = os.path.dirname(plausible_files[0])+"/"
+          if len(plausible_files) > 1:
+               raise RuntimeError(f"Multiple plausible files found for {galaxy} {filter} in release {path}: {plausible_files}")
+          elif len(plausible_files) == 1:
+               print(f"Found plausible file for {galaxy} {filter} in release {path}: {plausible_files[0]}")
+               return plausible_files[0]
           else:
-               raise FileNotFoundError(f"No file found for {galaxy} {filter} in {path}. Please check the path and file naming conventions.")
-     return path
+               raise FileNotFoundError(f"No file found for {galaxy} {filter} in {wdir + version + '/'} . Please check the path and file naming conventions.")
 
 
 
@@ -172,18 +213,13 @@ def get_pixarea_in_sr(header):
      
 
 
-def open_jwst(path, gal, dir, band, mosaic_ext="*anchor*.fits", get_coverage=True):
+def open_jwst(filename, get_coverage=True):
      """
      Open JWST data (from either MIRI/NIRCam) and return image, error, header.
      Using the stage 3 aligned data products, and it defaults to the anchored mosaic (which is the most aligned product).
 
      Args:
-          path: path to the data directory
-          gal: galaxy name
-          dir: directory name
-          band: filter name (e.g., F770W, F1000W, etc.)
-          level: useful if data is hidden in a subdirectory (typical for pjpipe outputs)
-          mosaic_ext: extension to search for (default is the anchored mosaic)
+          filename: path to the FITS file
           get_coverage: whether to return a coverage mask (default True)
      Returns:
           img: 2D array of the image data
@@ -193,24 +229,12 @@ def open_jwst(path, gal, dir, band, mosaic_ext="*anchor*.fits", get_coverage=Tru
           header: FITS header of the image data
      """
      # Load the files
-     # TODO implement better fallbacks starting with mosaic_ext (default anchored) and then falling back to i2d or types
-     print(f"Searching in {path} for {band} data, with extension: {mosaic_ext}")
-     #     files = glob.glob(f"{path}/{gal.lower()}*{band.lower()}*{mosaic_ext}")
-     files = glob.glob(path + f"*{band.lower()}*{mosaic_ext}*")
-     print(f"Files found: {files}")
-
-     # Sanity check that we are getting only one aligned mosaic
-     if len(files) == 0:
-          raise FileNotFoundError(f"No files found for {band} in {dir}{gal}")
-     elif len(files) > 1:
-          print(f"Warning: Multiple files found for {band} in {dir}{gal}. Using the first one: {files[0]}")
-
      # Initialize variables
      img_file = None
      err_file = None
 
      # Open the file and use extensions to assign data and header
-     with fits.open(files[0]) as hdul:
+     with fits.open(filename) as hdul:
           img_file = hdul['SCI']
           img = img_file.data
           header = img_file.header
@@ -223,13 +247,20 @@ def open_jwst(path, gal, dir, band, mosaic_ext="*anchor*.fits", get_coverage=Tru
                # estimate error from image - parameters are from Jimena's HST phot, probably need tuning for JWST
                sigma_clip = SigmaClip(sigma=5., maxiters=10)
                bkg_estimator = SExtractorBackground()
-               bkg = Background2D(img, (30,30), filter_size=(3, 3),  fill_value=0.0,
-                                     sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+               coverage_mask = (~np.isfinite(img)) | (img == 0)
+               bkg = Background2D(
+                    img,
+                    (30,30),
+                    filter_size=(3, 3),
+                    fill_value=0.0,
+                    sigma_clip=sigma_clip,
+                    bkg_estimator=bkg_estimator,
+                    coverage_mask=coverage_mask,
+               )
                # 3rd parameter = Ratio of counts (e.g., electrons or photons) to the data units         
                err = calc_total_error(img, bkg.background, effective_gain = header['XPOSURE']/header['PHOTMJSR']) 
                # TODO double check units of calc_total_error() 
                err_file = "Estimated from image"
-
      # Check the names of the image and error extensions 
      print(f"Image file: {img_file}")
      print(f"Error file: {err_file}")
@@ -280,34 +311,31 @@ def match(
 # ------------------------------------------------
 # Background subtraction
 # ------------------------------------------------
-def subtract_bkg(img,
+# TODO: need to include valid mask based on weight image or other metric
+
+def _background_filename_for(image_path):
+     """Return the standard cached background filename for an image."""
+     base, _ = os.path.splitext(image_path)
+     return f"{base}_background.fits"
+
+
+def calculate_bkg(img,
           gal,
           band,
-          box_size_pix=50, 
-          filter_size_pix=3, 
-          bkg_estimator=MedianBackground(), 
+          box_size_pix=50,
+          filter_size_pix=3,
+          bkg_estimator=MedianBackground(),
           coverage_mask=False,
           doplot=True,
           sigma_to_clip_bkg=3.0,
           maxiters_for_bkg_clip=5,
+          image_path=None,
+          header=None,
           **kwargs):
-     """Estimate and subtract background from image using Background2D.
-     Args:
-          img: 2D array of image data
-          box_size_pix: size of boxes for background estimation (in pixels)
-          filter_size_pix: size of median filter to apply to background (in pixels)
-          bkg_estimator: background estimator to use (default is MedianBackground())
-          coverage_mask: boolean array where True indicates pixels to exclude from background estimation (e.g., low coverage or bad data).
-     Returns:
-          img_sub: background-subtracted image
-          bkg_mean: mean background level (in same units as img)
-          bkg_rms: background RMS (in same units as img)"""
-     
-     # estimate background
-     # TODO: need to include valid mask based on weight image or other metric
+     """Estimate the background model and save it to a standard background FITS file."""
+
      sigma_clip = SigmaClip(sigma=sigma_to_clip_bkg, maxiters=maxiters_for_bkg_clip)
 
-     # Check if box size is even. If it is, add one to each of the values
      if type(box_size_pix) != type([]):
           box_size_pix = (box_size_pix, box_size_pix)
      if box_size_pix[0] % 2 == 0:
@@ -320,12 +348,13 @@ def subtract_bkg(img,
 
      bkg_estimator = eval(bkg_estimator) if isinstance(bkg_estimator, str) else bkg_estimator
 
-    
      if coverage_mask is False:
-          print(f"Creating coverage mask")
+          print("Creating coverage mask")
           coverage_mask = (~np.isfinite(img)) | (img == 0)
 
      # note: photutils<3.0 used edge_method='pad' by default, but photutils>=3.0 does not have this option and instead pads with fill_value=0.0 by default.
+     # Explicitly mask invalid and zero-valued pixels before the background estimate to avoid
+     # the non-finite-data warning emitted by photutils.Background2D.
      bkg = Background2D(
           img,
           box_size=box_size_pix,
@@ -333,46 +362,94 @@ def subtract_bkg(img,
           sigma_clip=sigma_clip,
           bkg_estimator=bkg_estimator,
           coverage_mask=coverage_mask,
-          )
+     )
 
      rms_map = np.array(bkg.background_rms, dtype=float)
      valid_rms = (~coverage_mask) & np.isfinite(rms_map) & (rms_map > 0)
-
-     #print(f"bkg array {bkg.background}")
+     # print(f"bkg array {bkg.background}")
      bkg_rms = np.nanmedian(rms_map[valid_rms]) if np.any(valid_rms) else np.nan
      bkg_mean = np.nanmean(np.asarray(bkg.background, dtype=float)[~coverage_mask])
-     print(f"Mean background: {bkg_mean}")
-     print(f"Background rms: {bkg_rms}")
-     print(f"Subtracting background...")
-     
+
+     # print(f"bkg array {bkg.background}")
+     if image_path is not None:
+          background_path = _background_filename_for(image_path)
+          out_header = header.copy() if header is not None else fits.Header()
+          hdu = fits.PrimaryHDU(data=np.asarray(bkg.background, dtype=float), header=out_header)
+          hdu.writeto(background_path, overwrite=True)
+          print(f"Saved background map to {background_path}")
 
      # threshold_img = snr_threshold * bkg.background_rms
      img_sub = img - bkg.background
-     print(f"Background subtraction complete.")
 
      if doplot:
           # Plot the image, background, and background-subtracted image
           fig, ax = plt.subplots(1, 3, figsize=(18, 6))
-          norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
-                                vmax=np.nanpercentile(img, 99.99), 
+          norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00),
+                                vmax=np.nanpercentile(img, 99.99),
                                 stretch=LogStretch())
           ax[0].imshow(img, origin='lower', cmap='inferno', norm=norm)
           ax[0].set_title(f"{gal.upper()} {band.upper()} mosaic")
           # TODO: gal and band as global properties
           ax[1].imshow(bkg.background, origin='lower', cmap='inferno')
-          ax[1].set_title(f"Estimated background")
-          norm_sub = ImageNormalize(vmin=np.nanpercentile(img_sub, 25.00), 
-                                    vmax=np.nanpercentile(img_sub, 99.99), 
+          ax[1].set_title("Estimated background")
+          img_sub = img - bkg.background
+          norm_sub = ImageNormalize(vmin=np.nanpercentile(img_sub, 25.00),
+                                    vmax=np.nanpercentile(img_sub, 99.99),
                                     stretch=LogStretch())
           ax[2].imshow(img_sub, origin='lower', cmap='inferno', norm=norm_sub)
-          ax[2].set_title(f"Background-subtracted image")
-          # Add colourbars
+          ax[2].set_title("Background-subtracted image")
           for a in ax:
                im = a.images[0]
                plt.colorbar(im, ax=a, pad=0.01, fraction=0.05)
-          plt.savefig(out_dir+f"/{gal}_{band}_background_subtraction.png", dpi=300)
+          plt.savefig(out_dir + f"/{gal}_{band}_background_subtraction.png", dpi=300)
+          plt.close(fig)
 
-     return img_sub, bkg_mean, bkg_rms, bkg
+     print(f"Mean background: {bkg_mean}")
+     print(f"Background rms: {bkg_rms}")
+     return bkg.background, bkg_mean, bkg_rms
+
+
+def subtract_bkg(image_path,
+          gal=None,
+          band=None,
+          box_size_pix=50,
+          filter_size_pix=3,
+          bkg_estimator=MedianBackground(),
+          coverage_mask=False,
+          doplot=True,
+          sigma_to_clip_bkg=3.0,
+          maxiters_for_bkg_clip=5,
+          **kwargs):
+     """Create a cached background FITS file if needed and subtract it from the image."""
+     background_path = _background_filename_for(image_path)
+
+     if not os.path.exists(background_path):
+          print(f"Background file not found for {image_path}. Calculating background...")
+          img, err, snr_map, coverage_mask, header = open_jwst(image_path)
+          calculate_bkg(
+               img=img,
+               gal=gal,
+               band=band,
+               box_size_pix=box_size_pix,
+               filter_size_pix=filter_size_pix,
+               bkg_estimator=bkg_estimator,
+               coverage_mask=coverage_mask,
+               doplot=doplot,
+               sigma_to_clip_bkg=sigma_to_clip_bkg,
+               maxiters_for_bkg_clip=maxiters_for_bkg_clip,
+               image_path=image_path,
+               header=header,
+               **kwargs,
+          )
+     else:
+          print(f"Background file found on disk for {image_path}.")
+
+     img, err, snr_map, coverage_mask, header = open_jwst(image_path)
+     bkg_background = fits.getdata(background_path)
+     bkg_mean = np.nanmean(bkg_background)
+     bkg_rms = np.nanstd(bkg_background)
+     img_sub = img - bkg_background
+     return img_sub, bkg_mean, bkg_rms, bkg_background
 
 
 # ------------------------------------------------
@@ -382,10 +459,10 @@ def run_source_finder(img,
                       gal,
                       band,
           header, 
-          bkg,
+          bkg_rms,
           finder='iraf', 
           snr_threshold=3.0, 
-          fwhm=2.0, 
+          fwhm_pix=2.0, 
           box_size_pix=(5,5),  # TODO reconcile RH's value of 50 with JR's value of 3 here
           roundlo=-0.5, 
           roundhi=0.5, 
@@ -403,7 +480,7 @@ def run_source_finder(img,
           header: FITS header of the image (used for WCS and pixel scale)
           finder: source finder to use (currently 'iraf' and 'peaks' supported)
           snr_threshold: signal-to-noise ratio threshold for source detection
-          fwhm: FWHM of the PSF in pixels (used for source detection)
+          fwhm_pix: FWHM of the PSF in pixels (used for source detection)
           roundlo, roundhi: roundness limits for source selection
           sharplo, sharphi: sharpness limits for source selection
           nsources: if not None, only return this many brightest sources in the catalog
@@ -413,7 +490,7 @@ def run_source_finder(img,
      print(f"Running source finder: {finder}")
      
      # Get the threshold image from the background calculation
-     ths = snr_threshold * bkg.background_rms
+     ths = snr_threshold * bkg_rms
 
      # Add option to import an external source catalog
      # instead of running a source finder. Useful for testing 
@@ -422,7 +499,7 @@ def run_source_finder(img,
      # IRAFStarFinder 
      if finder == 'iraf':
           source_finder = IRAFStarFinder(threshold=ths,
-               fwhm=fwhm,
+               fwhm=fwhm_pix,
                roundness_range=(roundlo, roundhi),
                sharpness_range=(sharplo, sharphi),
                n_brightest=nsources,
@@ -433,7 +510,7 @@ def run_source_finder(img,
      # DAOStarFinder (can use elliptical apertures)
      elif finder == 'dao':
           source_finder = DAOStarFinder(threshold=ths,
-               fwhm=fwhm,
+               fwhm=fwhm_pix,
                roundness_range=(roundlo, roundhi),
                sharpness_range=(sharplo, sharphi),
                n_brightest=nsources,
@@ -477,19 +554,20 @@ def run_source_finder(img,
 
      #convert from x,y in the image to  sky coordinates   
      #----------------------------------------
-     sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=WCS(header)) 
-     sources['ra']=sk.ra
-     sources['dec']=sk.dec
-
-     #convert from x,y in the image to  sky coordinates   
-     #----------------------------------------
-     sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=WCS(header)) 
+     with warnings.catch_warnings():
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*OBSGEO.*",
+               category=FITSFixedWarning,
+          )
+          wcs_obj = WCS(header)
+     sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=wcs_obj)
      sources['ra']=sk.ra
      sources['dec']=sk.dec
 
      if doplot:
           # Plot the image with sources 
-          fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+          fig, ax = plt.subplots(1, 1, figsize=(8, 8))
           norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
                                 vmax=np.nanpercentile(img, 99.99), 
                                 stretch=LogStretch())
@@ -499,9 +577,20 @@ def run_source_finder(img,
           im = ax.images[0]
           plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
           plt.savefig(out_dir+f"/{gal}_{band}_source_finder_{finder}.png", dpi=300)
+          # zoom in on a region
+          x0=np.mean(plt.xlim())
+          y0=np.mean(plt.ylim())
+          zoom_size = 100  # size of the zoomed-in region in pixels
+          ax.set_xlim(x0 - zoom_size/2, x0 + zoom_size/2)
+          ax.set_ylim(y0 - zoom_size/2, y0 + zoom_size/2)
+          ax.set_title(f"{gal.upper()} {band.upper()} mosaic, S/N threshold = {snr_threshold}")
+          ax.scatter(sources['xcentroid'], sources['ycentroid'], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.8)
+          plt.savefig(out_dir+f"/{gal}_{band}_source_finder_{finder}_zoom.png", dpi=300)
+          plt.close(fig)
+
 
      print(f"Found {len(sources)} sources")
-     print(sources.colnames)
+     # print(sources.colnames)
 
      if write:
           if "find_cat_filename" in kwargs:
@@ -584,7 +673,7 @@ def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, doplo
      r_opt = radii[idx[0]] if len(idx) else radii[np.nanargmax(median_curve)]
      print(f"Optimal aperture radius: {r_opt}")
 
-     if plot:
+     if doplot:
           plt.figure()
           plt.plot(radii, median_curve, marker='o')
           plt.axvline(r_opt, color='red')
@@ -611,8 +700,9 @@ def compute_photometry(data,
           maxiters_for_bkg_clip=5,
           phot_method='exact',
           doplot=True,
-          write=False, 
-          overwrite=False,
+          write=True, 
+          phot_cat_filename=None,
+          overwrite=True,
           apcorr_step=True, 
           local_bkg_subtract=True,
           **kwargs):
@@ -637,7 +727,7 @@ def compute_photometry(data,
 
      if use_brightest is not False:
           # Aperture photometry of only brightest sources
-          sources = sources[np.argsort(sources['flux'])[-use_brightest:]]
+          sources = sources[np.argsort(sources['peak_value'])[-use_brightest:]]
           print(f"using only {len(sources)} sources")
 
      if apcorr_step:
@@ -646,11 +736,13 @@ def compute_photometry(data,
           print(f"Using aperture correction factor of {apcorr} for radius {radius} pixels.")
 
      # Do aperture photometry
-     print(f"Doing aperture photometry...")
+     print()
+     print(f"Doing aperture photometry for {len(sources)} sources...")
      positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
      apertures = CircularAperture(positions, r=radius)
      aper_stats = ApertureStats(data, apertures, error=err)
      phot_full = aperture_photometry(data, apertures, error=err, method=phot_method) # Jimena also passed a mask - why?
+     phot_full['aperture_min'] = np.asarray(aper_stats.min)
 
      # Annulus
      annuli = CircularAnnulus(positions, r_in=radius_sky_in, r_out=radius_sky_out)
@@ -695,7 +787,13 @@ def compute_photometry(data,
           phot_full['peak'] = np.asarray(sources['peak_value'])   # TODO change peakfinder output to have peak instead of peak_value
 
      # Include ra, dec
-     wcs = WCS(header)
+     with warnings.catch_warnings():
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*OBSGEO.*",
+               category=FITSFixedWarning,
+          )
+          wcs = WCS(header)
      ra, dec = wcs.all_pix2world(phot_full["xcenter"], phot_full["ycenter"], 0)
      phot_full["ra"] = ra
      phot_full["dec"] = dec
@@ -726,27 +824,33 @@ def compute_photometry(data,
           print(f"Band {band} not recognized for error calculation. Setting total_aperture_sum_err to max possible, sqrt(aperture_sum_err**2 + bkg_err**2).")
           phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2)
 
+     # special step for the continuum subtracted PAH bands to filter some of the poor subtractions:
+     if "pah" in band.lower():
+          negative_threshold = -1
+          z_neg = np.where(phot_full['aperture_min'] < negative_threshold)[0]
+          phot_full['aperture_sum_err'][z_neg] *= 3
+          if len(z_neg) > 0:
+               print(f"Found {len(z_neg)} sources with aperture_min < {negative_threshold}. Increased their aperture_sum_err by a factor of 3.")
+
+
      # Add the errors
      phot_full['bkg_err_mJy'] = np.asarray(bkg_err_mJy)
      phot_full['poisson_err_mJy'] = np.asarray(phot_full['aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
      phot_full['tot_err_mJy'] = np.asarray(phot_full['total_aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
-
  
      # Sort by aperture flux
      phot_full.sort("aperture_sum")
      phot_full.reverse()
 
      # Print the column names of the photometry table
-     print(phot_full.colnames)
+     # print(phot_full.colnames)
 
      # Write the catalog if requested
      if write:
-          if "phot_cat_filename" in kwargs:
-               cat_name = kwargs["phot_cat_filename"]
-          else:
-               cat_name = f"{gal}_jwst_{band}_cat." + cat_filetype
-          print(f"Writing catalog to {out_dir + cat_name}")
-          phot_full.write(out_dir + cat_name, overwrite=overwrite)
+          if phot_cat_filename is None:
+               phot_cat_filename = f"{gal}_jwst_{band}_phot_cat." + cat_filetype
+          print(f"Writing catalog to {out_dir + phot_cat_filename}")
+          phot_full.write(out_dir + phot_cat_filename, overwrite=overwrite)
 
      if doplot:
           # plot photometry results
@@ -759,28 +863,58 @@ def compute_photometry(data,
           plt.xscale("log")
           plt.yscale("log")
           plt.savefig(out_dir+f"/{gal}_{band}_appflux_dflux.png", dpi=300)
+          plt.close(fig)
 
           # Plot the image with significant sources 
-          fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+          fig, ax = plt.subplots(1, 1, figsize=(8, 8))
           norm = ImageNormalize(vmin=np.nanpercentile(data, 25.00), 
                                 vmax=np.nanpercentile(data, 99.99), 
                                 stretch=LogStretch())
           ax.imshow(data, origin='lower', cmap='inferno', norm=norm)
           ax.set_title(f"{gal.upper()} {band.upper()}")
-          z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
-          ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
-          z=np.where(phot_full['aperture_flux_mJy']/phot_full['tot_err_mJy']>3)[0]
-          ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=30, marker='*',edgecolor='white', facecolor='none', lw=0.5, alpha=0.7,label="Total SNR>3")
+          # z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
+          # ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
+          label_low_snr_values = True  # Set to True to label each red low-SNR source with its SNR value
+          err_threshold = 1.5
+          snr = phot_full['aperture_flux_mJy'] / phot_full['tot_err_mJy']
+          hi_label_added = False
+          lo_label_added = False
+          for idx in range(len(phot_full)):
+               x = phot_full['xcenter'][idx]
+               y = phot_full['ycenter'][idx]
+               linewidth = 1
+               alpha = 0.7     
+               if snr[idx] > err_threshold:
+                    edgecolor = 'k'
+                    label = None if hi_label_added else f"SNR > {err_threshold}"
+                    hi_label_added = True
+               elif snr[idx] >0 and phot_full['aperture_flux_mJy'][idx]/phot_full['poisson_err_mJy'][idx]>5:
+                    edgecolor = 'g'
+                    label = None if lo_label_added else f"SNR < {err_threshold}"
+                    lo_label_added = True
+               else:
+                    continue
+               circ = plt.Circle((x, y), radius=radius, fill=False, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha, label=label)
+               ax.add_patch(circ)
+               if snr[idx] < err_threshold and label_low_snr_values:
+                    #ax.text(x + radius * 1.2, y + radius * 1.2, f"{snr[idx]:.1f}", color='g', fontsize=8, ha='left', va='bottom')
+                    ax.text(x + radius * 1.2, y + radius * 1.2, f"{phot_full['aperture_flux_mJy'][idx]/phot_full['poisson_err_mJy'][idx]:.1f}", color='g', fontsize=8, ha='left', va='bottom')
+                    
           ax.legend(loc="best",prop={"size":8})
           im = ax.images[0]
           plt.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
           plt.savefig(out_dir+f"/{gal}_{band}_significant_sources.png", dpi=600)
+          plt.close(fig)
 
 
 
      return apertures, phot_full
 
 
+
+
+
+#=====================================================================================
 def bkg_error_quantiles(data, annulus_masks, sigma=3.0):
      """Compute local background statistics in the annulus around each source.
      Args:
@@ -823,6 +957,9 @@ def bkg_error_quantiles(data, annulus_masks, sigma=3.0):
                     
 
 
+
+
+#=====================================================================================
 def get_apcorr_params(crds_dir, band, inst, eefraction_value=0.8, apcorr_method='crds'):
      """Get the aperture correction parameters from the CRDS apcorr file for a given filter and eefraction.
      Args:
@@ -931,12 +1068,838 @@ def get_apcorr_params(crds_dir, band, inst, eefraction_value=0.8, apcorr_method=
      # If nothing is recognised, use a simplified approximation. 
      else:
           print(f"Using default (basic) aperture correction parameters for {band} with eefraction {eefraction_value}...")
-          radius = filter_fwhm.get(band.upper(), 2.0)  # default to 2 pixels if filter not found
+          radius = filter_fwhm_pix.get(band.upper(), 2.0)  # default to 2 pixels if filter not found
           sky_in = radius + 2
           sky_out = radius + 8
           apcorr = (1.0 / eefraction_value) * u.dimensionless_unscaled # simple correction factor based on eefraction
 
      return radius, sky_in, sky_out, apcorr
+
+def get_psf_file(band):
+     candidates = glob.glob(psf_dir + f"PSF*{band}*fits")
+
+     if len(candidates) == 0:
+          raise FileNotFoundError(f"No PSF files found for {band} in {psf_dir}")
+     elif len(candidates) > 1:
+          print(f"Multiple PSF files found for {band} in {psf_dir}. Using the first one: {candidates[0]}")
+     return candidates[0]     
+
+
+
+
+
+#=====================================================================================
+# Take an image clip and return the residual after subtracting the PSFcores of sources as defined by params
+def residual(params,imclip,return_type,psfcore,scor_pix,sfitrgn_pix,njparams):
+     # params = [fluxes,jtypes] # jtypes could be fixed
+     # the "f" parameters are the fluxes of the main and neighboring sources
+     fparms=[x for x in params.keys() if x[0]=='f']
+
+     nsrc=len(fparms) 
+     if return_type == "substars":
+          outclip = imclip.copy()
+     elif return_type == "suball":
+          outclip = imclip.copy() - params['bg']    
+     elif return_type == "stars":
+          outclip = np.zeros(imclip.shape) 
+     else:
+          raise ValueError(f"Unknown return_type: {return_type}")     
+     mask=np.ones(outclip.shape,dtype="bool")
+         
+     for i in range(nsrc):
+          dj,j=math.modf(params['j%i'%i])
+          # x1,y1 parameter is the offset in full pixel units
+          off=np.array([params['x%i'%i],params['y%i'%i]])
+          off0=np.int32(off) # off0 is nearest full pixel  
+  
+          dx,x=math.modf(4*off[0]-4*off0[0]) # x,dx are in 1/4-pix units, and relative to the nearest whole pixel off0
+          dy,y=math.modf(4*off[1]-4*off0[1])
+          x=int(x)+2 # extra +2 because psf is centered between whole pixels
+          y=int(y)+2
+          j=int(j)
+          
+          # find broadened psfs bracketing the parameter j1 (and interpolate below)
+          j1=j+1
+          if j1>=njparams-1:
+               j1=njparams-1
+          
+          q11 = np.roll(psfcore[j ],[x  ,y  ],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+          q21 = np.roll(psfcore[j ],[x+1,y  ],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+          q12 = np.roll(psfcore[j ],[x  ,y+1],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+          q22 = np.roll(psfcore[j ],[x+1,y+1],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+          j0model = q11*(1-dx)*(1-dy) +q12*(1-dx)*dy +q21*dx*(1-dy) +q22*dx*dy            
+  
+  
+          # turn off qq calculation if njparams=1 i.e. no broadening
+          if njparams>1:
+               r11 = np.roll(psfcore[j1],[x  ,y  ],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+               r21 = np.roll(psfcore[j1],[x+1,y  ],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+               r12 = np.roll(psfcore[j1],[x  ,y+1],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+               r22 = np.roll(psfcore[j1],[x+1,y+1],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+               j1model = r11*(1-dx)*(1-dy) +r12*(1-dx)*dy +r21*dx*(1-dy) +r22*dx*dy
+  
+          # pp=np.roll(psfdat,[i,j],axis=[0,1])
+          # gf(pp,widths[k]).reshape(s[0]//4,4,s[1]//4,4).sum(3).sum(1)
+                                      
+          if params['j%i'%i]>0:
+               if j<njparams-1:
+                    imodel=j0model*(1-dj) + j1model*dj
+               else:
+                    imodel=j1model
+          else:
+               imodel=j0model
+  
+          # now we need to full-pixel location of the imodel (psf core size scor_pix) inside the image clip
+          brd=sfitrgn_pix//2-scor_pix//2 # border between clip and psfcore
+          # where to place in x, if not off edge
+          xou=[sfitrgn_pix[1]//2+off0[1]-scor_pix[1]//2, sfitrgn_pix[1]//2+off0[1]+scor_pix[1]//2]
+          xin=[0,scor_pix[1]+1] # index in psfcore
+          you=[sfitrgn_pix[0]//2+off0[0]-scor_pix[0]//2, sfitrgn_pix[0]//2+off0[0]+scor_pix[0]//2]
+          yin=[0,scor_pix[0]+1] # index in psfcore
+          if off0[1]<-brd[1]: # off left side
+               xou[0]=0
+               xin[0]=-off0[1]-brd[1]
+          if off0[1]>=brd[1]: # off right side
+               xou[1]=sfitrgn_pix[1]
+               xin[1]=scor_pix[1]-(off0[1]-brd[1])
+          if off0[0]<-brd[0]: # off bottom
+               you[0]=0
+               yin[0]=-off0[0]-brd[0]
+          if off0[0]>=brd[0]: # off top
+               you[1]=sfitrgn_pix[0]
+               yin[1]=scor_pix[0]-(off0[0]-brd[0])
+  
+          if return_type=="stars": # 2026 not sure why I had this:? or params['f%i'%i].vary==True: 
+               outclip[xou[0]:xou[1],you[0]:you[1]] += \
+                    params['f%i'%i]*imodel[xin[0]:xin[1],yin[0]:yin[1]]
+          else:
+               outclip[xou[0]:xou[1],you[0]:you[1]] -= \
+                    params['f%i'%i]*imodel[xin[0]:xin[1],yin[0]:yin[1]]
+               mask[xou[0]:xou[1],you[0]:you[1]] = False
+               # TODO mask tighter for psf peak only?
+ 
+     if return_type=="suball":
+          # TEST SOFTENING of residual - for f1000, SQRT helps, 1/3 doesn't make much difference.
+          z=np.where(outclip>0)
+          #outclip[z]=(outclip[z])**(1/4)
+          outclip[z]=np.sqrt(outclip[z])
+          z=np.where(outclip<0)
+          #outclip[z]=-(-outclip[z])**(1/4)
+          outclip[z]=-np.sqrt(-outclip[z])
+         
+          outclip[np.where(mask)]=0
+          return outclip # TODO - weight small scales by subtracting the median?
+     else:
+          return outclip
+
+
+
+
+
+#=====================================================================================
+def get_apcor_from_psf(band,r_ap,r_sky_in,r_sky_out):
+     """
+     Get aperture correction from PSF for a given band and aperture parameters.
+
+     Parameters
+     ----------
+     band : str
+         The band of the observation.
+     r_ap : array-like
+         Aperture radii
+     r_sky_in : array-like
+         Inner radii of the sky annulus.
+     r_sky_out : array-like
+         Outer radii of the sky annulus.
+
+     Returns
+     -------
+     apcor : array-like 
+         Aperture correction factors for each set of aperture parameters.
+     """
+     apcor = np.zeros_like(r_ap, dtype=float)
+
+     # Find the PSF file for this band and load the oversampled PSF image.
+     psf_file = get_psf_file(band)
+     psf_data = fits.getdata(psf_file)
+
+     # Operate in oversampled (quarter-pixel) coordinates.
+     r_ap = np.asarray(r_ap, dtype=float)
+     r_sky_in = np.asarray(r_sky_in, dtype=float)
+     r_sky_out = np.asarray(r_sky_out, dtype=float)
+     r_ap, r_sky_in, r_sky_out = np.broadcast_arrays(r_ap, r_sky_in, r_sky_out)
+
+     y0 = (psf_data.shape[0] - 1) / 2.0
+     x0 = (psf_data.shape[1] - 1) / 2.0
+     pos = [(x0, y0)]
+
+     psf_sum_ap = np.zeros(r_ap.shape, dtype=float)
+     psf_mean_ann = np.zeros(r_ap.shape, dtype=float)
+     npix_ap = np.zeros(r_ap.shape, dtype=float)
+     npix_ann = np.zeros(r_ap.shape, dtype=float)
+
+     for i in np.ndindex(r_ap.shape):
+          aper = CircularAperture(pos, r=4.0 * r_ap[i])
+          ann = CircularAnnulus(pos, r_in=4.0 * r_sky_in[i], r_out=4.0 * r_sky_out[i])
+          ap_phot = aperture_photometry(psf_data, aper, method='exact')
+          ann_phot = aperture_photometry(psf_data, ann, method='exact')
+
+          npix_ap[i] = float(aper.area)
+          npix_ann[i] = float(ann.area)
+          psf_sum_ap[i] = float(ap_phot['aperture_sum'][0])
+          psf_mean_ann[i] = float(ann_phot['aperture_sum'][0]) / npix_ann[i]
+
+     return np.nansum(psf_data) / ( psf_sum_ap - psf_mean_ann * npix_ap )
+
+
+
+
+#=====================================================================================
+def fit_and_subtract(infile, # input mosaic image 
+                    band="pah33",
+                    whathdu='SCI', # which HDU to use for the image - TODO refactor into open_jwst
+                    srcfile=None, # source catalog to use for fitting 
+                    file_root="psffit",
+                    pixbinfactor=1.,
+                    fittype="amp", # "amp" or "amppos" or "ampwid" or None to just create residual
+                    doplot=True,
+                    kflux='flux_F1000W', # key name for app flux in input catalog
+                    kdflux='fluxerr_F1000W',  # key name for app flux error in input catalog
+                    kra='raj2000', # key name for RA in input catalog
+                    kde='dej2000', # key name for Dec in input catalog
+                    doregion=False,
+                    rd0=[0,0], # center of region to fit in degrees
+                    d=0.01 # size of region to fit in degrees
+                    ):
+
+     from lmfit import minimize, Parameters, create_params
+
+
+     maxfluxfactor=4 # limit on how much brighter the source can get when fit
+    
+     # rotational angle miri is V3 +~5
+     # PA_APER =   245.97609259623073 / [deg] Position angle of aperture used
+     # PA_V3   =   241.05116909076034 / [deg] Position angle of telescope V3 axis
+
+     imfloor=1 # add a floor to the image for display only
+     origfluxcut = 0.5 # filter for only sources with aperture flux above this value
+     froot = file_root
+     fiteverything=True # if False, only fit crowded sources
+     plotborder=0 # fraction of sfitrgn_pix to include around the border when displaying the region
+     alpha=0.5 # for overplotting sources
+     larger_sfitrgn_pix=True
+     tomjy=1.0 # convert from input catalog units to mJy TODO make this automatic based on the input catalog units
+     debug=False
+
+     
+     #---------------------------------------------
+     # load input image
+     with warnings.catch_warnings():
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*OBSGEO.*",
+               category=FITSFixedWarning,
+          )
+          inhdu = fits.open(infile)[whathdu]
+          inwcs = wcs.WCS(inhdu.header)
+
+     # pixel scale in arcsec/pixel
+     pixsize = wcs.utils.proj_plane_pixel_scales(inwcs) * 3600
+     # if this is a simulated image moved to a larger distance, then the pixels are artificially large
+     # because the simulated images have large pixels in the WCS, so that the coordinates of sources
+     # match the original nearby image. If you're not doing simulated images, pixbinfactor should be 1.
+     pixsize /= pixbinfactor
+     
+     # Sr per pixel, used to convert between mJy flux density and MJy/Sr peak value
+     srperpix=(pixsize[0]/206265)**2
+
+     fwhm_pix=filter_fwhm_pix[band.upper()]
+     wave=filter_wave[band.upper()]
+
+
+     # there are several radii and clip image sizes used here
+     # first is rpix, the radius in pixels used for ds9 and plotting
+     # position of first null = 2.37*HWHM
+     rpix=2.37*fwhm_pix/2
+     # radii related to psf-fitting are defined below.
+     
+     
+     #---------------------------------------------
+     # read in input source list
+     srclist=Table.read(srcfile,format="ascii")
+     
+     # order from brightest to faintest
+     # TODO refactor to do this only in the fit loop, to not disorder the actual list
+     # and keep it identical to the input order
+     u=np.argsort(srclist[kflux])[::-1]
+     
+     nsrc=len(srclist)
+     srcra=srclist[kra].data
+     srcde=srclist[kde].data
+     
+     
+     #---------------------------------------------
+     # set up psfs - expects 4 x oversampled psf in the file
+     psffile = get_psf_file(band)
+
+     psfdat=fits.getdata(psffile)
+     #OVERSAMP=                    4 / Oversampling factor for FFTs in computation
+     #DET_SAMP=                    4 / Oversampling factor for MFT to detector plane
+     #PIXELSCL=               0.0277 / Scale in arcsec/pix (after oversampling)
+     
+     # make psfs broadened by "widths" quarter-pixel amounts:
+     widths=np.int32(np.round(np.array([0,4,8])*wave/21))+1 # scale by wavelength
+     # force broader - doesn't really do much
+     widths=[1,2,4]     
+     nbroad=len(widths)
+     
+     s=psfdat.shape
+     # this "p" array will store broadened psfs, at quarter-pix resolution
+     p=np.zeros([nbroad,s[0],s[1]]) 
+     
+     # ROTATE psf to the correct position angle
+     psfdat=rotate(psfdat,-inhdu.header['pa_aper'],reshape=False)
+     
+     for k in range(nbroad):
+          p[k]=gf(psfdat,widths[k])
+          # p[k]=gf(psfdat,widths[k]).reshape(s[0]//4,4,s[1]//4,4).sum(3).soum(1)
+          # https://stackoverflow.com/questions/36063658/how-to-bin-a-2d-array-in-numpy
+          p[k]/=p[k].sum()
+     
+     #---------------------------------------------
+     # set up for psf-fitting 
+     # the psf fitting will only use the core of the psf, defined here of size
+     #   2*npixrcore in quarter-pixels = scor_qpix
+     # the subimage over which the fitting is done is sized "sfitrgn_pix" in fullpixels,
+     #    or "window" in degrees
+     # sources inside rfit radius will be fitted
+     # sources inside sfitrgn_pix, but outside of rfit, will be subtracted with their current flux in the flux catalog during the fit
+     # then scor_pix is the size of the core psf in full pixels, scor_qpix//4
+     
+     # keep track of any sources that get their fluxes adjusted by fitting
+     fitted=np.zeros(nsrc)
+     # and the fitted j parameter (width)
+     jout=np.zeros(nsrc)
+     # and fitted xy position
+     xyout=np.zeros([nsrc,2])
+     # distance to the nearest source
+     nearest=np.zeros(nsrc)
+     # fitted local background/ floor level
+     bgfit=np.zeros(nsrc)
+
+     # the new fitted flux (will be filled during fitting)
+     newflux=srclist[kflux].data.copy()
+     
+     # what is distance of proximity that sources have to be fit together?
+     # use 2*fwhm
+     rfit=fwhm_pix*pixsize[0]*2/3600
+     
+     # for F2100 I did 70:111 i.e. a half-width of 6.7*FWHM or 2.7*first null
+     # npixrcore=int(round(7*fwhm/2/pixsize[0]*4)) # quarter-pixels
+     # that seems a bit much for other bands
+     npixrcore=int(round(6*fwhm_pix/4))*8 # quarter-pixels, multiple of 
+     # scor_pix is npixrcore*2, modulo being even - this defines the size of the core psf used for fitting
+     
+     # this is the half-size of the input psf in quarter-pixels
+     spsf=psfdat.shape[0]//2 # this is even - the psf is centered between pixels 
+     icore=[spsf-npixrcore,spsf+npixrcore]
+
+     # this is the core region of the psf in quarter-pixels
+     psfcore=p[:,icore[0]:icore[1],icore[0]:icore[1]]
+     scor_qpix=np.array(psfcore.shape[-2:])
+     # scor_pix is the size of psfcore in full pixels
+     scor_pix = scor_qpix//4  # has to be even
+     
+     # psfcore is centered at 39.5,39.5 = scor_pix/2-0.5
+     degperpix=pixsize[0]/3600
+     
+     # sfitrgn_pix is the size of the fitting region in full pixels - it has to at least fit the core psf
+     sfitrgn_pix=np.int32(np.round(scor_pix*1.5/2))*2
+     # the distance in degrees within which we have to find sources to fit along with the source being considered
+     window=(sfitrgn_pix[0]//2)*degperpix # equal to the half-size of the fitting region - find everything
+     
+     if larger_sfitrgn_pix:
+          sfitrgn_pix=np.int32(np.round(scor_pix*2/2))*2 # larger sfitrgn_pix 
+          window=scor_pix[0]*1.5/2 *degperpix # but leave window for finding which sources to fit = 2*core psf
+          froot+="_sfitrgn_pix3"
+     
+     if sfitrgn_pix[0]/2!=sfitrgn_pix[0]//2:
+          raise ValueError("sfitrgn_pix is odd")
+     
+     
+     if doregion:
+          froot+="_region"
+          cdec=np.cos(rd0[1]*np.pi/180)
+          subim_xy=np.int32(inwcs.wcs_world2pix([[rd0[0]-d/cdec,rd0[1]-d],[rd0[0]+d/cdec,rd0[1]+d]],0))
+          if larger_sfitrgn_pix: # does this work?  seems off?
+               subim_xy+=np.array([[sfitrgn_pix[1]//4,-sfitrgn_pix[0]//4],[-sfitrgn_pix[1]//4,sfitrgn_pix[0]//4]])
+             
+               subim=inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]
+     else:
+          subim=inhdu.data
+          subim_xy=[[subim.shape[1],0],[0,subim.shape[0]]]
+
+     # initialize the residual image for fitting, if there is going to actually be any fitting.
+     if fittype is not None:
+          resid=subim.copy()
+          model=np.zeros(subim.shape)
+     # params dx,dy are offsets from the central pixel of the stack for each src
+     # with psfdat in hand, we go to closest quarter-pixels in the residual image
+          
+     # this will store the residual from photometry before fitting i.e. from the app phot
+     resid_nofit=subim.copy()
+     # this will just be the stars, using the original photometry
+     model_nofit=np.zeros(subim.shape)
+     
+     
+     
+     #---------------------------------------------
+     # subplot 0 is the original image, zoomed if doregion=True
+     
+     if doplot:          
+          fig = plt.figure(0,figsize=(8,8))
+          plt.clf()
+          plt.subplots_adjust(top=0.95,bottom=0.1,left=0.1,right=0.98)
+          plt.subplot(2,2,1)
+          plt.imshow(np.sqrt(subim+imfloor),origin="lower",vmin=-0.5,vmax=3)#,cmap='jet')
+          if doregion:
+               ax=plt.gca()
+               #ax.use_sticky_edges=False
+               #ax.margins(x=-0.4,y=-0.4)
+               # zoom because of border
+               s=subim.shape
+               ax.set_xlim(plotborder*sfitrgn_pix[0],s[1]-plotborder*sfitrgn_pix[0])
+               ax.set_ylim(plotborder*sfitrgn_pix[1],s[0]-plotborder*sfitrgn_pix[1])
+          
+          plt.xlabel("k:fit m:near fit x:near nofit r:nofit")
+          plt.title("original image")
+          plt.xticks([])
+          plt.savefig(f"{froot}_orig.png",dpi=300)
+          plt.close(fig)
+     
+     # open a ds9 output file
+     ds9reg=open(f"{srcfile[:-4]}.reg","w")
+     ds9reg.write("fk5\n")
+     
+     th=np.arange(21)/10*np.pi
+     st=np.sin(th)
+     ct=np.cos(th)
+     
+     
+     #---------------------------------------------
+     # the loop over sources
+     for i0 in range(nsrc):
+          i=u[i0] # sorted order bright->faint
+          if (srclist[kflux][i]<1e-8):
+               continue
+          # discard sources with flux below the threshold
+          if srclist[kflux][i]<(origfluxcut*srclist[kdflux][i]):
+               newflux[i]=1e-8
+               fitted[i]=-1
+               continue
+
+          # pixel position of the source in the subimage
+          xy=inwcs.wcs_world2pix([[srcra[i],srcde[i]]],0)[0]-np.array([subim_xy[1][0],subim_xy[0][1]])
+          
+          # only deal with sources where the entire regular-pix-size psfcore (sfitrgn_pix) fits within the subim
+          # (the subim is the entire image if doregion=False)
+          if srclist[kflux][i]>0 and xy.min()>(sfitrgn_pix[0]/2) and xy[1]<(subim.shape[0]-sfitrgn_pix[0]//2) and xy[0]<(subim.shape[1]-sfitrgn_pix[1]//2):
+      
+               if debug:
+                    print(i,xy)
+       
+               xy0=np.int32(np.round(xy))
+               # from here to the end of processing this source, everything is relative to xy0,
+               # the rounded source position in the original (sub)image coordinates, 
+               # which maps to sfitrgn_pix//2 in the small clipped region to be fit
+       
+               # fractional pixel offset of the source
+               off=xy-xy0
+               
+               # determine nearest 1/4 pixel offset to roll the psf        
+               # +2 is b/c psf is centered between whole pixels - verified 20250209
+               xy4i=np.int32(np.round(off*4))+2
+               # subtract the original aperture photom, unbroadened
+               # TODO consider subtracting entire psf, not just core of size scor_pix
+               resid_nofit[xy0[1]-scor_pix[1]//2:xy0[1]+scor_pix[1]//2,xy0[0]-scor_pix[0]//2:xy0[0]+scor_pix[0]//2]-= \
+                    srclist[kflux][i]*tomjy*1e-9/srperpix* \
+                    np.roll(psfcore[0],[xy4i[0],xy4i[1]],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+               model_nofit[xy0[1]-scor_pix[1]//2:xy0[1]+scor_pix[1]//2,xy0[0]-scor_pix[0]//2:xy0[0]+scor_pix[0]//2]+= \
+                    srclist[kflux][i]*tomjy*1e-9/srperpix* \
+                    np.roll(psfcore[0],[xy4i[0],xy4i[1]],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+
+               # if this source has not yet been fitted
+               # (if fittype==None, then we'll never go in this block)
+               if fittype and fitted[i]<=0:
+                   # find neighboring sources, within "window" (usually set to sfitrgn_pix*pixsize/2 above)
+                    cdec=np.cos(srcde[i]*np.pi/180)
+                    znear=np.where( (np.absolute(srcra-srcra[i])<1.*window/cdec )*
+                                   (np.absolute(srcde-srcde[i])<1.*window )*
+                                   (newflux>1e-6))[0]
+       
+                    # if newflux (which is still the input flux) of the main source is bright enough, 
+                    # and there are some neighbours, they may be part of the airy ring and should be removed
+                    if newflux[i]>0.15 and len(znear)>1:    # TODO make this condition specific to F1000W only
+                         d2=(srcra[znear]-srcra[i])**2*cdec**2 + (srcde[znear]-srcde[i])**2
+                         zring=znear[np.where((d2>(1.1/3600)**2)*(d2<(1.5/3600)**2))[0]] # TODO THIS IS FOR F1000W ONLY
+                         if len(zring)>0:
+                              fitted[zring]=100
+                              newflux[zring]=1e-8
+                              # TODO plot these with different symbol?
+                         znear=np.where( (np.absolute(srcra-srcra[i])<1.*window/cdec )*
+                                       (np.absolute(srcde-srcde[i])<1.*window )*
+                                       (newflux>1e-8))[0]
+       
+                    if len(znear)>1: # sort neighbour sources by distance from the primary source
+                         d2=(srcra[znear]-srcra[i])**2*cdec**2 + (srcde[znear]-srcde[i])**2
+                         znear_ord=znear[d2.argsort()]
+                         d2.sort()
+
+                         # distinguish between "very" close - within 1/4 of the fitting radius, and just neighboring 
+                         if d2[1] < (rfit**2 / 16):  # /4 or /9= TEST ALLOW CLOSER TO BE WIDENED
+                              someclose=True  # some are very close
+                         else:
+                              someclose=False
+                    else: # znear includes the source itself, so if it is length==1, its *only* the primary source
+                         znear_ord=znear
+                         someclose=False
+                         d2=np.array([0])
+
+                    # fiteverything means to fit all neighbors in the fitregion, 
+                    # otherwise only fit the primary source and the "very close"
+                    if fiteverything or someclose:
+                         if "wid" in fittype and not someclose: # extra parameters - only do widening if not crowded.
+                              print("widening")
+                              njparams=nbroad
+                         else:
+                              njparams=1
+       
+                         # NOTE: sfitrgn_pix must be even #pix (20250210 TODO check if still true)
+                         # finally, we actually extract the "clip" fitting region:
+                         imclip=resid[xy0[1]-sfitrgn_pix[1]//2:xy0[1]+sfitrgn_pix[1]//2,
+                                      xy0[0]-sfitrgn_pix[0]//2:xy0[0]+sfitrgn_pix[0]//2]
+
+                         # the fitting will deal with the source peak flux in MJy/sr, 
+                         # because its easier to scale the model PSF that way, and later we can 
+                         # convert that back to mJy  
+                         thisfluxMJy=newflux[i]*tomjy*1e-9/srperpix # mJy -> Mjy/sr in peak pix
+         
+                         params = Parameters()
+                         params.add('bg', value=np.mean(imclip), min=0)
+
+                         # allow the fitted flux to be between 0 and the maximum flux factor times the initial flux
+                         params.add('f0', value=thisfluxMJy,min=0,max=thisfluxMJy*maxfluxfactor)
+         
+                         # if we're allowing the PSF to widen, we let the "j0" parameter vary - 
+                         # j0 is the index in the list of PSF broadening widths, and array of psfcores prepared above
+                         if njparams<=1:
+                              params.add('j0',value=0,vary=False)
+                         else:            
+                              params.add('j0',value=0,min=0,max=njparams-1)
+         
+                         # this will be the fitted offset from xy0 in whole pixel units, 
+                         # and is allowed to vary by +/- 1 pixel in both x and y directions
+                         params.add('x0',value=off[0],min=off[0]-1,max=off[0]+1)  
+                         params.add('y0',value=off[1],min=off[1]-1,max=off[1]+1)
+
+                         # if the position is not being fitted, we fix those offset values x0 and y0
+                         if "pos" not in fittype:
+                              params['x0'].vary=False
+                              params['y0'].vary=False
+
+                         # now go through the neighbors
+                         for ii in np.arange(1,len(znear_ord)):
+                             
+                              # other sources positions, are offset relative to the main source
+                              xy_near=inwcs.wcs_world2pix([[srcra[znear_ord[ii]],srcde[znear_ord[ii]]]],0)[0]-np.array([subim_xy[1][0],subim_xy[0][1]])
+                              off=xy_near-xy0
+
+                              # f1 f2 etc are the (peak) fluxes of the neighboring sources in MJy/sr
+                              thisfluxMJy=newflux[znear_ord[ii]]*tomjy*1e-9/srperpix # original or fitted flux
+                              params.add('f%i'%ii, value=thisfluxMJy,min=0,max=thisfluxMJy*maxfluxfactor)
+         
+                              # don't re-fit previously fitted sources, nor ones outside the rfit fitting radius
+                              if d2[ii]>rfit**2 or fitted[znear_ord[ii]]>0:
+                                   params['f%i'%ii].vary=False
+         
+                              if njparams<=1:
+                                   params.add('j%i'%ii,value=0,vary=False)
+                              else:
+                                   params.add('j%i'%ii,value=0,min=0,max=njparams-1)
+                             
+                              params.add('x%i'%ii,value=off[0],min=off[0]-1,max=off[0]+1)
+                              params.add('y%i'%ii,value=off[1],min=off[1]-1,max=off[1]+1)
+          
+                              if "pos" not in fittype:
+                                   params['x%i'%ii].vary=False
+                                   params['y%i'%ii].vary=False
+         
+                         # TODO put upper bound on bg level
+         
+                         # lmfit can't deal with nans
+                         z=np.where(np.isnan(imclip))
+                         # srcstack[0][z]=0
+                         # but the nans are on the edge so just don't fit sources with NaNs nearby
+                         if len(z[0])>0:
+         
+                              # allow to get within scor_pix of NaNs (generally only off the edge)
+                              s=imclip.shape
+                              zctr=np.where(np.isnan(imclip[s[1]//2-scor_pix[1]//2:s[1]//2+scor_pix[1]//2,s[0]//2-scor_pix[0]//2:s[0]//2+scor_pix[0]//2]))[0]
+                              if len(zctr)>0:
+                                   print("NaN too near position")
+                                   continue
+                              else:
+                                   # if there is a stray NaN in the fitting region, set it to zero
+                                   imclip[z]=0
+         
+                         # https://lmfit.github.io/lmfit-py/
+                         out=minimize(residual,params, args=[imclip,"suball"],nan_policy="omit")
+
+                         if out.success:
+                              # TODO this may be ~10% high because we fit the PSF core vs full PSF
+                              newflux[i] = out.params['f0'].value/tomjy *srperpix/1e-9
+                              fitted[i]=len(np.where(d2<rfit**2)[0]) # number of sources fitted TODO this doesn't take into account if some near sources have not be re-fit because they were previously fit
+                              jout[i]=out.params['j0']
+                              xyout[i]=np.array([out.params['x0'].value,out.params['y0'].value])+xy0
+                              bgfit[i]=out.params['bg']
+          
+                              # plot the point in black if it has been fitted
+                              if debug:
+                                   plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'k',alpha=alpha,linewidth=1)
+                              # set nearby *fitted* values and jout, xyout,
+                              # so they don't get fit again later
+                              for ii in np.arange(1,len(znear_ord)):
+                                   xynear=np.array([out.params['x%i'%ii].value,out.params['y%i'%ii].value])+xy0
+                                   xyout[znear_ord[ii]]=xynear
+                                   if out.params['f%i'%ii].vary==True:
+                                        fitted[znear_ord[ii]]=fitted[i]
+                                        jout[znear_ord[ii]]=out.params['j%i'%ii]
+                                        bgfit[znear_ord[ii]]=out.params['bg']
+                                        # plot the neighbor as magenta if it has been fitted
+                                        if debug:
+                                             plt.plot(xynear[0]+ct*rpix,xynear[1]+st*rpix,'m',alpha=alpha,linewidth=2)
+
+                                        # subtract the fitted neighbor from the original-photometry residual image
+                                        # we do this here because we won't consider a neighbor that gets fitted again later
+                                        # if we're doing actual fitting.
+                                        # If we're not doing actual fitting we'll never get here, 
+                                        # so this subtraction only happens during actual fitting.
+                                        xy0near=np.int32(np.round(xynear))                                        
+                                        xy4i=np.int32(np.round((xynear-xy0near)*4))
+                                        resid_nofit[xy0near[1]-scor_pix[1]//2:xy0near[1]+scor_pix[1]//2,xy0near[0]-scor_pix[0]//2:xy0near[0]+scor_pix[0]//2]-= \
+                                             srclist[kflux].data[znear_ord[ii]]*tomjy*1e-9/srperpix* \
+                                             np.roll(psfcore[0],[xy4i[0],xy4i[1]],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+                                        
+                                        model_nofit[xy0near[1]-scor_pix[1]//2:xy0near[1]+scor_pix[1]//2,xy0near[0]-scor_pix[0]//2:xy0near[0]+scor_pix[0]//2]+= \
+                                             srclist[kflux].data[znear_ord[ii]]*tomjy*1e-9/srperpix* \
+                                             np.roll(psfcore[0],[xy4i[0],xy4i[1]],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
+          
+                                      
+                                   # if we didn't fit this neighbor, and it wasn't previously fitted, plot it as a black 'x'
+                                   elif fitted[znear_ord[ii]]==0 and debug:
+                                        #fitted[znear_ord[ii]]=-1
+                                        plt.plot(xynear[0],xynear[1],'kx',alpha=alpha,linewidth=1)
+                              # if this source has been successfully fit,
+                              # replace its params with the new fitted ones 
+                              params=out.params 
+         
+                         elif debug:  # failed fit
+                              fitted[i]=-1
+                              pdb.set_trace()
+                             
+                         if len(znear)>1:
+                              nearest[i]=np.sqrt(d2[1])
+       
+                    # calling residual(return_type=substars) will only remove the fitted sources and 
+                    # not remove a flat bg i.e. its designed for creating the residual image
+                    thisresid=residual(params,imclip,"substars",psfcore,scor_pix,sfitrgn_pix,njparams)
+                    # note, failed fits still get subtracted from the fitted resid
+                    # TODO subtract entire psf, not just core, here (would need the residual function to do all that functionality now, so probably not worth it
+                    thismodel=residual(params,imclip,"model",psfcore,scor_pix,sfitrgn_pix,njparams)
+       
+                    resid[xy0[1]-sfitrgn_pix[1]//2:xy0[1]+sfitrgn_pix[1]//2,
+                         xy0[0]-sfitrgn_pix[0]//2:xy0[0]+sfitrgn_pix[0]//2] = thisresid
+
+                    model[xy0[1]-sfitrgn_pix[1]//2:xy0[1]+sfitrgn_pix[1]//2,
+                         xy0[0]-sfitrgn_pix[0]//2:xy0[0]+sfitrgn_pix[0]//2] = thismodel
+
+               # / end of "if actually fitting this source" block
+       
+               # if this source is not fit because it was previously fit, or
+               # we're only fitting crowded sources, then plot it as a dashed red circle
+               elif debug:
+                    plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'r--',dashes=(2,7),linewidth=1)
+       
+               if debug:
+                    pdb.set_trace()
+      
+          else: # this source is outside of the fittable region of the (sub)image
+               fitted[i]=-2
+      
+                  
+          # write all sources to ds9 TODO change symbol by fit outcome
+          if newflux[i]/srclist[kdflux][i]>3:
+               ds9reg.write("circle(%f,%f,1e-4)\n"%(srcra[i],srcde[i]))
+          #else:
+          #    ds9reg.write("point(%f,%f) # point=x color=white\n"%(srcra[i],srcde[i]))
+             
+     ds9reg.close()
+     
+     
+     
+     # =============== display the original/apphot residual image
+     if doplot:
+          plt.subplot(2,2,2)
+          plt.imshow(np.sqrt(resid_nofit+imfloor),origin="lower",vmin=-0.5,vmax=3)#,cmap='jet')
+          if doregion:
+              s=subim.shape
+              plt.xlim(plotborder*sfitrgn_pix[0],s[1]-plotborder*sfitrgn_pix[0])
+              plt.ylim(plotborder*sfitrgn_pix[1],s[0]-plotborder*sfitrgn_pix[1])
+              
+          if debug:
+              plt.xlabel("k:fit r:nofit y:fitfail")
+          plt.title("apphot residual")
+          plt.xticks([])
+      
+          if debug:
+              for i in range(nsrc):
+                  xy=inwcs.wcs_world2pix([[srcra[i],srcde[i]]],0)[0]-np.array([subim_xy[1][0],subim_xy[0][1]])
+                  if newflux[i]>-100:
+                      if fitted[i]!=0:
+                          plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'k',alpha=alpha,linewidth=1)
+                      else:
+                          plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'r:',alpha=alpha,linewidth=1)
+                  else:
+                      plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'y',linewidth=3)
+     
+     
+
+     if fittype is not None:
+          if doplot:
+               # ========================================
+               # now show the residual after psf-fitting 
+               plt.subplot(2,2,3)
+               plt.imshow(np.sqrt(resid+imfloor),origin="lower",vmin=-0.5,vmax=3)#,cmap='jet')
+               if debug:
+                    plt.xlabel("k:fit r:v.fnt m:~fnt c:~brt, y:fail")
+               plt.title("fit residual: "+fittype)
+               plt.xticks([])
+               
+               if debug:
+                    for i in range(nsrc):
+                         xy=inwcs.wcs_world2pix([[srcra[i],srcde[i]]],0)[0]-np.array([subim_xy[1][0],subim_xy[0][1]])
+                         if fitted[i]!=0:
+                              if newflux[i]>-100:
+                                   if newflux[i]<1e-4 and srclist[kflux][i]>1e-3:
+                                        plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'r:',linewidth=1)
+                                   elif newflux[i]<0.5*srclist[kflux][i] and srclist[kflux][i]>1e-3 and newflux[i]>1e-4:
+                                        plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'m',linewidth=1)
+                            
+                                   elif newflux[i]>2*srclist[kflux][i] and srclist[kflux][i]>1e-4 and newflux[i]>1e-4:
+                                        plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'c',linewidth=1)
+                            
+                                   else:
+                                        plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'k',alpha=alpha,linewidth=1)
+                              else:
+                                   plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'y',linewidth=3)
+
+          # save the residual image after fitting
+          if doregion:
+               s=subim.shape
+               plt.xlim(plotborder*sfitrgn_pix[0],s[1]-plotborder*sfitrgn_pix[0])
+               plt.ylim(plotborder*sfitrgn_pix[1],s[0]-plotborder*sfitrgn_pix[1])
+               inhdu.data=resid
+               inhdu.writeto(infile[:-5]+"_resid_region_"+fittype+".fits",overwrite=True)
+          else:
+               inhdu.data=resid
+               inhdu.writeto(infile[:-5]+"_resid_"+fittype+".fits",overwrite=True)
+
+          # save the model image after fitting
+          inhdu.data=model
+          if doregion:
+               inhdu.writeto(infile[:-5]+"_model_region_"+fittype+".fits",overwrite=True)
+          else:
+               inhdu.writeto(infile[:-5]+"_model_"+fittype+".fits",overwrite=True)
+
+
+     # save the residual image without fitting
+     inhdu.data=resid_nofit
+     if doregion:
+          inhdu.writeto(infile[:-5]+"_resid_apphot_region.fits",overwrite=True)
+     else:
+          inhdu.writeto(infile[:-5]+"_resid_apphot.fits",overwrite=True)
+     # save the model image without fitting
+     inhdu.data=model_nofit
+     if doregion:
+          inhdu.writeto(infile[:-5]+"_model_apphot_region.fits",overwrite=True)
+     else:
+          inhdu.writeto(infile[:-5]+"_model_apphot.fits",overwrite=True)
+
+
+     if fittype is not None:
+          srclist.add_columns([newflux,jout,fitted],names=[kflux+"_refit_"+fittype,('jout_%4.1f_'%wave)+fittype,('nfitted_%4.1f_'%wave)+fittype])
+          srclist.write(froot+"_refit.csv",overwrite=True)
+     
+     
+     if doplot:
+          # standard overplotting (non-debug)
+          for i in range(nsrc):
+               xy=inwcs.wcs_world2pix([[srcra[i],srcde[i]]],0)[0]-np.array([subim_xy[1][0],subim_xy[0][1]])
+               if newflux[i]>1e-8 and xy.min()>0 and xy[1]<subim.shape[0] and xy[0]<subim.shape[1] and srclist[kflux][i]>1e-6:
+                   if fitted[i]>0:
+                       if srclist[kflux][i]<=0:
+                           col='r'
+                           wid='2'
+                           alpha=1
+                       else:
+                           fratio=newflux[i]/srclist[kflux][i]
+                           alpha=1
+                           wid=1
+                           if fratio<0.1:
+                               col='r'
+                               alpha=0.5
+                           elif fratio<0.5:
+                               col='m'
+                           elif fratio>3:
+                               col='c'
+                           else:
+                               col='k'
+                               alpha=0.5
+           
+                       plt.subplot(2,2,4)
+                       plt.plot(srclist[kflux][i],newflux[i],'.',color=col)
+           
+                       if not debug:
+                           for jj in [1,2,3]:
+                               plt.subplot(2,2,jj)
+                               plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,col,alpha=alpha,linewidth=wid)
+                   elif not debug: # not fitted points
+                       for jj in [1,2,3]:
+                           plt.subplot(2,2,jj)
+                           plt.plot(xy[0],xy[1],'ks',alpha=0.5,markersize=5,linewidth=1,mfc="none")
+     
+     
+     
+          plt.subplot(2,2,4)
+          plt.plot(plt.xlim(),plt.xlim(),'k',alpha=0.2)
+          plt.xscale("log")
+          plt.yscale("log")
+          plt.xlabel("aperture photometry")
+          plt.ylabel("psf-fitted photometry")
+     
+          plt.savefig(froot+"_fit_resid.png")
+          plt.close()
+
+
+
+
+
+
+
+
+
+
+
 
 # ------------------------------------------------
 # Other useful functions
@@ -966,31 +1929,29 @@ def cross_match_catalogs(dir, filter, galaxy, phot_full, cat_image3):
 
 
 
-# Empirical filter FWHM in pixels  
-# NIRCAM from https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-performance/nircam-point-spread-functions#gsc.tab=0
-# MIRI from https://jwst-docs.stsci.edu/jwst-mid-infrared-instrument/miri-performance/miri-point-spread-functions#gsc.tab=0
-filter_fwhm = {
-    'F150W': 1.613,
-    'F164N': 1.806,
-    'F187N': 2.065,
-    'F200W': 2.129,
-    'F212N': 2.323,
-    'F277W': 1.460,
-    'F300M': 1.587,
-    'F335M': 1.762,
-    'F360M': 1.905,
-    'PAH33': 4.44,
-    'F405N': 2.159,
-    'F444W': 2.302,
-    'F770W': 2.445,
-    'F1000W': 2.982,
-    'F1130W': 3.409,
-    'F2100W': 6.127,
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#=====================================================================================
+# MAIN 
 
 # Directories
 jwst_dir = local['jwst_dir']
 out_dir = local['out_dir']
+psf_dir = local['psf_dir']
 crds_dir = local['crds_dir']
 cat_path = local['out_dir']  
 # TODO: add cat_path to local.toml if we want to load in an external catalog for photometry instead of running a source finder.
@@ -1031,18 +1992,20 @@ def do_photometry(
      catalogs = {}
 
      for gal in targets:
-          # Get the path to the data
-          #path = get_path_to_file(
-          #     wdir=jwst_dir, 
-          #     version=version, 
-          #     project=projects[0], 
-          #     galaxy=targets[0],
-          #     ptype=ptype[0],
-          #     filter=conf['bands'][0])
-
-          # Now loop through the filters for this galaxy
+          # loop through the filters for this galaxy
           for band in bands:
-               print(f"Processing {gal} at {band}...")
+               print("-----------------------------------------")
+               print(f">>> Processing {gal} at {band}...")
+
+               # Get the full path to the data
+               datafile = get_file(
+                    wdir=jwst_dir, 
+                    version=version, 
+                    project=projects[0], 
+                    galaxy=gal,
+                    ptype=ptype[0],
+                    filter=band)
+
                # Initialise catalogs dict to store the photometry results for each galaxy and filter
                if gal not in catalogs:
                     catalogs[gal] = {}
@@ -1050,17 +2013,12 @@ def do_photometry(
                     catalogs[gal][band] = {}
 
                # Open the JWST data file 
-               img, err, snr_map, coverage_mask, header = open_jwst(
-                    mosaic_ext = conf['product'],
-                    path = jwst_dir+"/"+gal+"/", 
-                    gal = gal, 
-                    dir = jwst_dir, 
-                    band = band
-               )
-
+               img, err, snr_map, coverage_mask, header = open_jwst(datafile)
                # TODO get distance from the galaxy sample table intead of the config file
                # Subtract background 
                if 'subtract_bkg' in steps:
+                    print()
+                    print(f"Subtracting background for {gal} at {band}...")
                     if 'box_size_pix' not in conf['parameters']['bkg_subtract']:
                          # Convert box size from pc to pixels using the pixel scale from the header
                          pix_scale = get_pixarea_in_sr(header) ** 0.5 * (180/np.pi) * 3600  # arcsec/pixel
@@ -1076,36 +2034,41 @@ def do_photometry(
                          conf['parameters']['bkg_subtract']['filter_size_pix'] = filter_size_pix
 
                     img_sub, bkg_mean, bkg_rms, bkg_background = subtract_bkg(
-                         img=img, 
+                         image_path=datafile,
                          gal=gal,
                          band=band,
                          **conf['parameters']['bkg_subtract'],
                     )
-
-               if 'subtract_bkg' in steps:
                     use_image = img_sub
                else:
+                    # bkg_rms is passed to the source finder even if background subtraction is not performed
+                    # so we need a different rms estimate;  TODO: implement a proper background RMS estimation for non-subtracted images
+                    # For now, we use the standard deviation of the image as a rough estimate of the background RMS
+                    bkg_rms = np.nanstd(img)
                     use_image = img
+               
+               # Load the filename from the config
+               if "find_cat_filename" in conf['parameters']['source_find']:
+                    cat_filename = conf['parameters']['source_find']['find_cat_filename']
+               else:
+                    cat_filename = f"{gal}_jwst_{band}_find_cat." + cat_filetype
 
                if 'source_find' in steps:
                     # Get sources using the source finder
-
+                    print()
+                    print(f"Finding sources for {gal} at {band}...")
                     sources = run_source_finder(
                          img=use_image, 
                          gal=gal,
                          band=band,
                          header=header, 
-                         bkg=bkg_background, 
+                         bkg_rms=bkg_rms, 
                          **conf['parameters']['source_find'],
                     )
                
                else:
-                    # Load the filename from the config
-                    if "find_cat_filename" in conf['parameters']['source_find']:
-                         cat_filename = conf['parameters']['source_find']['find_cat_filename']
-                    else:
-                         cat_filename = f"{gal}_jwst_{band}_find_cat." + cat_filetype
-                    print("Importing sources from existing catalog...")
+                    print()
+                    print(f"Importing sources from existing catalog for {gal} at {band}...")
                     # Load the existing source catalog
                     sources = Table.read(cat_path + cat_filename)
                     print(f"Loaded {len(sources)} sources from {cat_path + cat_filename}")
@@ -1152,17 +2115,19 @@ def do_photometry(
                          **conf['parameters']['r_opt']
                     )
                else:
-                    r_opt = filter_fwhm[band.upper()]*2.5 if use_filter_fwhm else conf['parameters']['photometry']['aperture_radius']
-                    print(f"Using fixed aperture radius of {r_opt} pixels for photometry.")
+                    fwhm2rad = conf['parameters']['photometry'].get('fwhm2rad', 2.5)
+                    r_opt = filter_fwhm_pix[band.upper()] * fwhm2rad if use_filter_fwhm else conf['parameters']['photometry']['aperture_radius']
+                    if 'aperture_photometry' in steps:
+                         print(f"Using fixed aperture radius of {r_opt} pixels for photometry.")
 
                # Update the fwhm according to the filter if use_filter_fwhm is True.
                # If use_filter_fwhm is False, stay at specified value.
-               if use_filter_fwhm:
+               if use_filter_fwhm and 'aperture_photometry' in steps:
                     try:
-                         fwhm = filter_fwhm[band.upper()]
-                         print(f"Using FWHM of {fwhm} pixels for source detection based on JWST PSF for {band.upper()}.")
+                         fwhm_pix = filter_fwhm_pix[band.upper()]
+                         print(f"Using FWHM of {fwhm_pix} pixels for source detection based on JWST PSF for {band.upper()}.")
                     except KeyError:
-                         print(f"Warning: FWHM for {band.upper()} not found in filter_fwhm dictionary. Using default FWHM of {fwhm} pixels for source detection.")
+                         print(f"Warning: FWHM for {band.upper()} not found in filter_fwhm_pix dictionary. Using default FWHM of {fwhm_pix} pixels for source detection.")
 
                # TODO: is there a better way of doing this?
                if "apcorr_step" in steps:
@@ -1177,8 +2142,15 @@ def do_photometry(
                #      print("Large r_opt. Using PSF FWHM rather than curve of growth for photometry.")
                #      r_opt = 2.5 * fwhm
 
+               # Load the filename from the config
+               if "phot_cat_filename" in conf['parameters']['photometry']:
+                    cat_filename = conf['parameters']['photometry']['phot_cat_filename']
+               else:
+                    cat_filename = f"{gal}_jwst_{band}_phot_cat." + cat_filetype
+
                # Perform photometry with circular apertures
                if 'aperture_photometry' in steps:
+                    print()
                     print(f"Performing photometry on {len(sources)} sources with aperture radius of {r_opt} pixels.")
                     apertures, catalog = compute_photometry(
                          # TODO this is important: do we want to use the background-subtracted image or the original image for this step?
@@ -1190,16 +2162,45 @@ def do_photometry(
                          radius = r_opt,
                          sources = sources,
                          apcorr_step = apcorr_step,
+                         # TODO put out_dir in cat_filename 
+                         phot_cat_filename = cat_filename,
                          out_dir = local['out_dir'],
                          **conf['parameters']['photometry']
                     )
 
-                    print(f"Photometry complete. Catalog has {len(catalog)} sources.")
+                    # print(f"Photometry complete. Catalog has {len(catalog)} sources.")
 
                     # Store the catalog in the catalogs dict
-                    print(catalog)
-                    print(catalog.colnames)
+                    # print(catalog)
+                    # print(catalog.colnames)
                     catalogs[gal][band] = catalog
+               else:
+                    phot_cat_path = os.path.join(local['out_dir'], cat_filename)
+                    if os.path.exists(phot_cat_path):
+                         catalogs[gal][band] = Table.read(phot_cat_path)
+                         print(f"Loaded photometry catalog from {phot_cat_path}")
+                    else:
+                         print(f"Warning: aperture_photometry not requested and photometry catalog not found at {phot_cat_path}.")
+
+               if "residual" in steps:
+                    print()
+                    print(f"Computing residual image for {gal} at {band}...")
+                    fit_and_subtract(
+                         datafile,
+                         band=band,
+                         srcfile=local['out_dir']+cat_filename, # source catalog to use for fitting 
+                         file_root=local['out_dir']+"psffit",
+                         pixbinfactor=1.,
+                         fittype=None, # "amp" or "amppos" or "ampwid" but here we want None to just create residual
+                         doplot=True,
+                         kflux='aperture_flux_mJy', # key name for app flux in input catalog
+                         kdflux='tot_err_mJy',  # key name for app flux error in input catalog
+                         kra='ra', # key name for RA in input catalog
+                         kde='dec', # key name for Dec in input catalog
+                         doregion=False,
+                         rd0=[0,0], # center of region to fit in degrees
+                         d=0.01 # size of region to fit in degrees
+                    )
 
      return catalogs
 
@@ -1213,6 +2214,30 @@ catalogs = do_photometry(
 
 
 exit()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------------------------------------
