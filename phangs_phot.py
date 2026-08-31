@@ -703,7 +703,7 @@ def compute_photometry(data,
           write=True, 
           phot_cat_filename=None,
           overwrite=True,
-          apcorr_step=True, 
+          apcorr_method=None, 
           local_bkg_subtract=True,
           **kwargs):
      """Compute aperture photometry for sources and return catalog with RA, Dec, magnitudes, etc.
@@ -730,7 +730,11 @@ def compute_photometry(data,
           sources = sources[np.argsort(sources['peak_value'])[-use_brightest:]]
           print(f"using only {len(sources)} sources")
 
-     if apcorr_step:
+     if apcorr_method == "psf":
+          # Get PSF-based aperture correction parameters
+          apcorr = get_apcorr_from_psf(band,radius,radius_sky_in,radius_sky_out)
+          print(f"Using PSF-based aperture correction factor of {apcorr} for radius {radius} pixels.")
+     else:
           # Get aperture correction parameters from CRDS file
           radius, radius_sky_in, radius_sky_out, apcorr = get_apcorr_params(crds_dir, band, inst='NIRCam', **conf['parameters']['apcorr'])
           print(f"Using aperture correction factor of {apcorr} for radius {radius} pixels.")
@@ -805,7 +809,7 @@ def compute_photometry(data,
      phot_full['aperture_sum_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header)
      # TODO add finder_flux_mjy
 
-     if apcorr_step:
+     if apcorr_method != None:
           if apcorr.unit.is_equivalent(u.dimensionless_unscaled):
                phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'] * apcorr, header=header)
           elif apcorr.unit.is_equivalent(u.mag):
@@ -848,7 +852,7 @@ def compute_photometry(data,
      # Write the catalog if requested
      if write:
           if phot_cat_filename is None:
-               phot_cat_filename = f"{gal}_jwst_{band}_phot_cat." + cat_filetype
+               phot_cat_filename = f"{gal}_jwst_{band}_phot_cat_r{radius:4.2f}." + cat_filetype
           print(f"Writing catalog to {out_dir + phot_cat_filename}")
           phot_full.write(out_dir + phot_cat_filename, overwrite=overwrite)
 
@@ -1197,7 +1201,7 @@ def residual(params,imclip,return_type,psfcore,scor_pix,sfitrgn_pix,njparams):
 
 
 #=====================================================================================
-def get_apcor_from_psf(band,r_ap,r_sky_in,r_sky_out):
+def get_apcorr_from_psf(band,r_ap,r_sky_in,r_sky_out):
      """
      Get aperture correction from PSF for a given band and aperture parameters.
 
@@ -1249,7 +1253,7 @@ def get_apcor_from_psf(band,r_ap,r_sky_in,r_sky_out):
           psf_sum_ap[i] = float(ap_phot['aperture_sum'][0])
           psf_mean_ann[i] = float(ann_phot['aperture_sum'][0]) / npix_ann[i]
 
-     return np.nansum(psf_data) / ( psf_sum_ap - psf_mean_ann * npix_ap )
+     return np.nansum(psf_data) / ( psf_sum_ap - psf_mean_ann * npix_ap ) * u.dimensionless_unscaled
 
 
 
@@ -1269,7 +1273,8 @@ def fit_and_subtract(infile, # input mosaic image
                     kde='dej2000', # key name for Dec in input catalog
                     doregion=False,
                     rd0=[0,0], # center of region to fit in degrees
-                    d=0.01 # size of region to fit in degrees
+                    d=0.01, # size of region to fit in degrees
+                    radius=None
                     ):
 
      from lmfit import minimize, Parameters, create_params
@@ -1824,16 +1829,18 @@ def fit_and_subtract(infile, # input mosaic image
 
      # save the residual image without fitting
      inhdu.data=resid_nofit
+     resid_suffix = f"_resid_apphot_r{radius:4.2f}" if radius is not None else "_resid_apphot"
      if doregion:
-          inhdu.writeto(infile[:-5]+"_resid_apphot_region.fits",overwrite=True)
+          inhdu.writeto(infile[:-5]+resid_suffix+"_region.fits",overwrite=True)
      else:
-          inhdu.writeto(infile[:-5]+"_resid_apphot.fits",overwrite=True)
+          inhdu.writeto(infile[:-5]+resid_suffix+".fits",overwrite=True)
      # save the model image without fitting
      inhdu.data=model_nofit
+     model_suffix = f"_model_apphot_r{radius:4.2f}" if radius is not None else "_model_apphot"
      if doregion:
-          inhdu.writeto(infile[:-5]+"_model_apphot_region.fits",overwrite=True)
+          inhdu.writeto(infile[:-5]+model_suffix+"_region.fits",overwrite=True)
      else:
-          inhdu.writeto(infile[:-5]+"_model_apphot.fits",overwrite=True)
+          inhdu.writeto(infile[:-5]+model_suffix+".fits",overwrite=True)
 
 
      if fittype is not None:
@@ -2130,10 +2137,10 @@ def do_photometry(
                          print(f"Warning: FWHM for {band.upper()} not found in filter_fwhm_pix dictionary. Using default FWHM of {fwhm_pix} pixels for source detection.")
 
                # TODO: is there a better way of doing this?
-               if "apcorr_step" in steps:
-                    apcorr_step = True
+               if "apcorr" in steps:
+                    apcorr_method = conf['parameters']['apcorr']['apcorr_method']
                else:
-                    apcorr_step = False
+                    apcorr_method = None
 
                # # ...or just set it to a fixed value (e.g., based on the PSF FWHM)
                # print(f"Setting aperture radius to {r_opt} pixels.")
@@ -2146,7 +2153,7 @@ def do_photometry(
                if "phot_cat_filename" in conf['parameters']['photometry']:
                     cat_filename = conf['parameters']['photometry']['phot_cat_filename']
                else:
-                    cat_filename = f"{gal}_jwst_{band}_phot_cat." + cat_filetype
+                    cat_filename = f"{gal}_jwst_{band}_phot_cat_r{r_opt:4.2f}." + cat_filetype
 
                # Perform photometry with circular apertures
                if 'aperture_photometry' in steps:
@@ -2161,7 +2168,7 @@ def do_photometry(
                          band = band,
                          radius = r_opt,
                          sources = sources,
-                         apcorr_step = apcorr_step,
+                         apcorr_method = apcorr_method,
                          # TODO put out_dir in cat_filename 
                          phot_cat_filename = cat_filename,
                          out_dir = local['out_dir'],
@@ -2199,7 +2206,8 @@ def do_photometry(
                          kde='dec', # key name for Dec in input catalog
                          doregion=False,
                          rd0=[0,0], # center of region to fit in degrees
-                         d=0.01 # size of region to fit in degrees
+                         d=0.01, # size of region to fit in degrees
+                         radius=r_opt
                     )
 
      return catalogs
@@ -2214,107 +2222,4 @@ catalogs = do_photometry(
 
 
 exit()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------------------------------------
-
-# Alternative approach using standardised aperture corrections from the JWST CRDS.
-path_to_crds = "/nexus/posix0/MIA-astro-env/eschinner/jgonzalez/jwst_pipeline/crds_cache/jwst_ops/references/jwst/" + 'nircam' + "/"
-
-# Get the apcorr file using glob
-apcorr_files = glob.glob(path_to_crds + f"*apcorr*")
-if len(apcorr_files) == 0:
-    raise FileNotFoundError(f"No apcorr files found for {band} in {inst} at {path_to_crds}")
-else:
-    print(f"Found apcorr files: {apcorr_files}")
-
-# Load the file
-apcorr_data = fits.getdata(apcorr_files[0], ext=1)
-print(f"APCORR data columns: {apcorr_data.columns.names}")
-
-# Print all the unique filters in the apcorr file
-print("Unique eefraction values:", np.unique(apcorr_data['eefraction']))
-
-# Get data for a specific eefraction
-# The eefraction is the fraction of the total flux that is enclosed within the aperture radius.
-eefraction_value = 0.70
-row = apcorr_data[apcorr_data['eefraction'] == eefraction_value]
-
-# Limit to a specific filter 
-row = row[(row['filter'] == band.upper())]
-
-# Extract values
-wcs_apcorr = WCS(header)
-radius = row['radius'][0]   # in pixels
-sky_in = row['skyin'][0]    # in pixels
-sky_out = row['skyout'][0]  # in pixels
-apcorr = row['apcorr'][0]   # factor to multiply enclosed flux to get total flux
-print(f"Using aperture correction factor of {apcorr} for radius {radius} pixels and eefraction {eefraction_value}")
-
-# Create apertures for aperture correction, not using the curve of growth
-positions = np.transpose((sources['x_centroid'], sources['y_centroid']))
-
-# Redo the aperture photometry using the radius, sky_in, and sky_out from the apcorr file
-aperture = CircularAperture(positions, r=radius)
-sky_annulus = CircularAnnulus(positions, r_in=sky_in, r_out=sky_out)
-phot_table_apcorr = aperture_photometry(img_sub, aperture, wcs=wcs_apcorr, method=phot_method)
-sky_table_apcorr = aperture_photometry(img_sub, sky_annulus, wcs=wcs_apcorr, method=phot_method)
-
-# Extract flux and sky
-fluxes = phot_table_apcorr['aperture_sum'].value  # MJy/sr
-sky_mean = sky_table_apcorr['aperture_sum'].value / sky_annulus.area  
-sky_total = sky_mean * aperture.area  
-
-# Correct for sky
-net_fluxes = fluxes - sky_total  
-
-# Apply aperture correction 
-total_fluxes = net_fluxes * apcorr  
-
-# Convert to AB magnitudes using the pixel area in steradians from the header
-pixarea_sr = header['PIXAR_SR']  # in steradians
-# total_flux_jy = total_fluxes * 1e6  # MJy → Jy
-abmag_apcorr = convert_aperture_sum_Jy_per_sr_to_abmag(total_fluxes, header=header)
-
-# Add column to the phot_table_apcorr with the aperture-corrected AB magnitudes
-phot_table_apcorr['ABmag_apcorr'] = abmag_apcorr
-
-# Create merged table on the x and y coordinates of the sources to compare 
-# the aperture-corrected magnitudes with the original photometry catalog
-merged_table = join(phot_table_apcorr, catalog, keys=['xcenter', 'ycenter'])
-
-
-# Make a histogram of the aperture sums in the catalog
-fig, ax = plt.subplots(figsize=(8,5))
-ax.hist(catalog['aperture_sum_abmag'], bins=30, alpha=0.5, label='Original photometry')
-ax.hist(phot_table_apcorr['ABmag_apcorr'], bins=30, alpha=0.5, label='Aperture-corrected')
-ax.set_xlabel('Aperture Sum')
-ax.set_ylabel('Frequency')
-ax.legend()
-plt.show()
-
 

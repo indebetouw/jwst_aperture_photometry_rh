@@ -1,8 +1,8 @@
 # Directories will be set in a locals file, not the config
 # note: we don't have a way to save the bkgsub image yet so it has to be recreated if you do find or aperture_photometry
 
-# steps = ["subtract_bkg", "source_find","aperture_photometry", "residual"]
-steps = ["aperture_photometry","apcorr_step","residual"]
+# steps = ["subtract_bkg", "source_find","aperture_photometry", "apcorr", "residual"]
+steps = ["aperture_photometry","apcorr"]
 targets = ["ngc5068"]
 product = ""
 bands = ["convolved_pah_f360m"]
@@ -48,15 +48,20 @@ nsources = 100000
 
 [parameters.apcorr]
 
+# for method=crds, you input an eefraction, and it calculates the radius to use for photometry
+# for method=cluster, the corrections determined for the specific Rodriguez aperture radii are used
+# for method=psf, you set the radius in photometry with fwhm2rad, radius_sky_in, radius_sky_out, and then 
+#     it calculates the ap corr from the psf for you.
+
 eefraction_value = 0.80
-apcorr_method = 'crds'
+apcorr_method = 'psf'
 
 [parameters.photometry]
 
 use_brightest = 20000  # 0=False or a number
 # TODO add an option to make this scale with r_opt
 # RH had 2.5x which is very large. 1 is a litte tight maybe
-fwhm2rad = 1.0
+fwhm2rad = 2.0
 radius_sky_in = 12
 radius_sky_out = 16
 sigma_to_clip_bkg = 3.0
