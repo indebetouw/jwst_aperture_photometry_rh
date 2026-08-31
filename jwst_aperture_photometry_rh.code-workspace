@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../phangs_phot"
+		},
+		{
+			"path": "../../../cv/jwst_clusters/instrument/psf"
 		}
 	],
 	"settings": {}
