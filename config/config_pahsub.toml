@@ -2,7 +2,7 @@
 # note: we don't have a way to save the bkgsub image yet so it has to be recreated if you do find or aperture_photometry
 
 # steps = ["subtract_bkg", "source_find","aperture_photometry", "apcorr", "residual"]
-steps = ["aperture_photometry","apcorr"]
+steps = ["residual","psffit"]
 targets = ["ngc5068"]
 product = ""
 bands = ["convolved_pah_f360m"]
@@ -58,12 +58,13 @@ apcorr_method = 'psf'
 
 [parameters.photometry]
 
-use_brightest = 20000  # 0=False or a number
+use_brightest = 2000  # 0=False or a number
 # TODO add an option to make this scale with r_opt
-# RH had 2.5x which is very large. 1 is a litte tight maybe
-fwhm2rad = 2.0
-radius_sky_in = 12
-radius_sky_out = 16
+# RH had 2.5x which is very large. 1 is a little tight maybe. 1.5 seems ok for now
+fwhm2rad = 1.5
+# radius_sky can either be a number in pixels, or a string like "2r" to indicate 2*aperture radius
+radius_sky_in  = 8
+radius_sky_out = 10
 sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
 write = true
@@ -71,3 +72,13 @@ overwrite = true
 cat_filetype = "csv"    # csv, fits, or other type that astropy table recognizes
 local_bkg_subtract = true
 # phot_cat_filename = '' # option to override default f"{gal}_jwst_{band}_cat." + cat_filetype
+
+[parameters.residual]
+
+doregion = true
+region_center = [199.729, -21.040]
+region_size = 0.01 # 0.0015
+
+[parameters.psffit]
+
+fittype="ampwid"
