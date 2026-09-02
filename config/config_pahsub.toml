@@ -1,13 +1,14 @@
 # Directories will be set in a locals file, not the config
 # note: we don't have a way to save the bkgsub image yet so it has to be recreated if you do find or aperture_photometry
 
-# steps = ["subtract_bkg", "source_find", "aperture_photometry"]
-steps = ["subtract_bkg", "aperture_photometry"]
+# steps = ["subtract_bkg", "source_find","aperture_photometry", "residual"]
+steps = ["aperture_photometry","apcorr_step","residual"]
 targets = ["ngc5068"]
 product = ""
-bands = ["pah33"]
+bands = ["convolved_pah_f360m"]
+# bands = ["F335M"]
 version = ''
-ptype = ["images"]
+ptype = [""]
 projects = [""]
 inst = ["NIRCam"]
 cat_filetype = "csv"
@@ -36,7 +37,7 @@ plot = false
 [parameters.source_find]
 
 finder = 'peaks'
-snr_threshold = 3.0
+snr_threshold = 5.0
 fwhm = 2.0
 roundlo = -0.5
 roundhi = 0.5
@@ -48,17 +49,19 @@ nsources = 100000
 [parameters.apcorr]
 
 eefraction_value = 0.80
-apcorr_method = 'cluster'
+apcorr_method = 'crds'
 
 [parameters.photometry]
 
-use_brightest = false
+use_brightest = 20000  # 0=False or a number
 # TODO add an option to make this scale with r_opt
+# RH had 2.5x which is very large. 1 is a litte tight maybe
+fwhm2rad = 1.0
 radius_sky_in = 12
 radius_sky_out = 16
 sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
-write = false
+write = true
 overwrite = true
 cat_filetype = "csv"    # csv, fits, or other type that astropy table recognizes
 local_bkg_subtract = true

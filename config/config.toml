@@ -50,6 +50,7 @@ apcorr_method = 'crds'
 [parameters.photometry]
 
 use_brightest = false
+fwhm2rad = 2.5
 radius_sky_in = 5
 radius_sky_out = 10
 sigma_to_clip_bkg = 3.0
