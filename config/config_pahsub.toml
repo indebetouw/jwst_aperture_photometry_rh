@@ -1,9 +1,9 @@
 # Directories will be set in a locals file, not the config
 # note: we don't have a way to save the bkgsub image yet so it has to be recreated if you do find or aperture_photometry
 
-# steps = ["subtract_bkg", "source_find","aperture_photometry", "apcorr", "residual"]
-steps = ["residual","psffit"]
-targets = ["ngc5068"]
+# steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr", "residual", "psffit"]
+steps = ["psffit"]
+targets = ["ngc3351"]
 product = ""
 bands = ["convolved_pah_f360m"]
 # bands = ["F335M"]
@@ -37,7 +37,7 @@ plot = false
 [parameters.source_find]
 
 finder = 'peaks'
-snr_threshold = 5.0
+snr_threshold = 10.0
 fwhm = 2.0
 roundlo = -0.5
 roundhi = 0.5
@@ -75,9 +75,10 @@ local_bkg_subtract = true
 
 [parameters.residual]
 
-doregion = true
-region_center = [199.729, -21.040]
-region_size = 0.01 # 0.0015
+doregion = false
+# NGC5068 [199.729, -21.040]. # .01
+region_center =  [160.9902, 11.7022]
+region_size = 0.002
 
 [parameters.psffit]
 

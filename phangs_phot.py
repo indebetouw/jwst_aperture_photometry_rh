@@ -896,7 +896,7 @@ def compute_photometry(data,
           ax.set_title(f"{gal.upper()} {band.upper()}")
           # z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
           # ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
-          label_low_snr_values = True  # Set to True to label each red low-SNR source with its SNR value
+          label_low_snr_values = False  # Set to True to label each red low-SNR source with its SNR value
           err_threshold = 1.5
           snr = phot_full['aperture_flux_mJy'] / phot_full['tot_err_mJy']
           hi_label_added = False
@@ -1165,6 +1165,8 @@ def residual(params,imclip,return_type,psfcore,scor_pix,sfitrgn_pix,njparams):
      # the "f" parameters are the fluxes of the main and neighboring sources
      fparms=[x for x in params.keys() if x[0]=='f']
 
+     # TODO copy the imclip upstream, so this can just imclip without copying it every iteration
+
      nsrc=len(fparms) 
      if return_type == "substars":
           outclip = imclip.copy()
@@ -1192,7 +1194,8 @@ def residual(params,imclip,return_type,psfcore,scor_pix,sfitrgn_pix,njparams):
           j1=j+1
           if j1>=njparams-1:
                j1=njparams-1
-          
+
+          # these psfs are also binned back to the original pixel scale from 4x
           q11 = np.roll(psfcore[j ],[x  ,y  ],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
           q21 = np.roll(psfcore[j ],[x+1,y  ],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
           q12 = np.roll(psfcore[j ],[x  ,y+1],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
@@ -1239,10 +1242,10 @@ def residual(params,imclip,return_type,psfcore,scor_pix,sfitrgn_pix,njparams):
                you[1]=sfitrgn_pix[0]
                yin[1]=scor_pix[0]-(off0[0]-brd[0])
   
-          if return_type=="stars": # 2026 not sure why I had this:? or params['f%i'%i].vary==True: 
+          if return_type=="stars": 
                outclip[xou[0]:xou[1],you[0]:you[1]] += \
                     params['f%i'%i]*imodel[xin[0]:xin[1],yin[0]:yin[1]]
-          else:
+          elif params['f%i'%i].vary==True:  # 2026 TODO make sure this is what we want - not subtract unfit neighbors
                outclip[xou[0]:xou[1],you[0]:you[1]] -= \
                     params['f%i'%i]*imodel[xin[0]:xin[1],yin[0]:yin[1]]
                mask[xou[0]:xou[1],you[0]:you[1]] = False
@@ -1254,8 +1257,8 @@ def residual(params,imclip,return_type,psfcore,scor_pix,sfitrgn_pix,njparams):
           #outclip[z]=(outclip[z])**(1/4)
           outclip[z]=np.sqrt(outclip[z])
           z=np.where(outclip<0)
-          #outclip[z]=-(-outclip[z])**(1/4)
-          outclip[z]=-np.sqrt(-outclip[z])
+          # outclip[z]=-(-outclip[z])**(1/4)
+          # outclip[z]=-np.sqrt(-outclip[z])
          
           outclip[np.where(mask)]=0
           return outclip # TODO - weight small scales by subtracting the median?
@@ -1360,7 +1363,7 @@ def fit_and_subtract(infile, # input mosaic image
      alpha=0.5 # for overplotting sources
      larger_sfitrgn_pix=False
      tomjy=1.0 # convert from input catalog units to mJy TODO make this automatic based on the input catalog units
-     debug=False
+     debug=False # stop every source and show neighbors etc
 
      
      #---------------------------------------------
@@ -1421,7 +1424,7 @@ def fit_and_subtract(infile, # input mosaic image
      # make psfs broadened by "widths" quarter-pixel amounts:
      widths=np.int32(np.round(np.array([0,4,8])*wave/21))+1 # scale by wavelength
      # force broader - doesn't really do much for for miri, 
-     widths=[1,4,10]     
+     widths=[1,3,6]     
      # 3.6sub has point sources at widths of 0.19" up to compact sources of 0.32"
      # 4 pixel width =16 quarter pix should get us up to the more extended sources
      nbroad=len(widths)
@@ -1435,7 +1438,7 @@ def fit_and_subtract(infile, # input mosaic image
      
      for k in range(nbroad):
           p[k]=gf(psfdat,widths[k])
-          # p[k]=gf(psfdat,widths[k]).reshape(s[0]//4,4,s[1]//4,4).sum(3).soum(1)
+          # p[k]=gf(psfdat,widths[k]).reshape(s[0]//4,4,s[1]//4,4).sum(3).sum(1)
           # https://stackoverflow.com/questions/36063658/how-to-bin-a-2d-array-in-numpy
           p[k]/=p[k].sum()
      
@@ -1482,6 +1485,7 @@ def fit_and_subtract(infile, # input mosaic image
 
      # this is the core region of the psf in quarter-pixels
      psfcore=p[:,icore[0]:icore[1],icore[0]:icore[1]]
+     # TODO: divide by sum of psfcore, to get the flux normalization right later when making the residual?
      scor_qpix=np.array(psfcore.shape[-2:])
      # scor_pix is the size of psfcore in full pixels
      scor_pix = scor_qpix//4  # has to be even
@@ -1496,7 +1500,7 @@ def fit_and_subtract(infile, # input mosaic image
      
      if larger_sfitrgn_pix:
           sfitrgn_pix *=2 
-          froot+="_sfitrgn_pix2"
+          froot+="_sfitrgnx2"
      
      if sfitrgn_pix[0]/2!=sfitrgn_pix[0]//2:
           raise ValueError("sfitrgn_pix is odd")
@@ -1660,7 +1664,7 @@ def fit_and_subtract(infile, # input mosaic image
                          # the fitting will deal with the source peak flux in MJy/sr, 
                          # because its easier to scale the model PSF that way, and later we can 
                          # convert that back to mJy  
-                         thisfluxMJy=newflux[i]*tomjy*1e-9/srperpix # mJy -> Mjy/sr in peak pix
+                         thisfluxMJy=newflux[i]*tomjy*1e-9/srperpix # mJy -> Mjy/sr assuming normalized psf
          
                          params = Parameters()
                          params.add('bg', value=np.mean(imclip), min=0)
@@ -1809,6 +1813,8 @@ def fit_and_subtract(infile, # input mosaic image
                     plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'r--',dashes=(2,7),linewidth=1)
        
                if debug:
+                    plt.ion()
+                    plt.show()
                     pdb.set_trace()
       
           else: # this source is outside of the fittable region of the (sub)image
@@ -1842,7 +1848,7 @@ def fit_and_subtract(infile, # input mosaic image
           if debug:
               for i in range(nsrc):
                   xy=inwcs.wcs_world2pix([[srcra[i],srcde[i]]],0)[0]-np.array([subim_xy[1][0],subim_xy[0][1]])
-                  if newflux[i]>-100:
+                  if newflux[i]>-10:
                       if fitted[i]!=0:
                           plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'k',alpha=alpha,linewidth=1)
                       else:
@@ -1867,7 +1873,7 @@ def fit_and_subtract(infile, # input mosaic image
                     for i in range(nsrc):
                          xy=inwcs.wcs_world2pix([[srcra[i],srcde[i]]],0)[0]-np.array([subim_xy[1][0],subim_xy[0][1]])
                          if fitted[i]!=0:
-                              if newflux[i]>-100:
+                              if newflux[i]>-10:
                                    if newflux[i]<1e-4 and srclist[kflux][i]>1e-3:
                                         plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'r:',linewidth=1)
                                    elif newflux[i]<0.5*srclist[kflux][i] and srclist[kflux][i]>1e-3 and newflux[i]>1e-4:
@@ -1970,7 +1976,7 @@ def fit_and_subtract(infile, # input mosaic image
           plt.xlabel("aperture photometry")
           plt.ylabel("psf-fitted photometry")
      
-          plt.savefig(froot+"_fit_resid.png")
+          plt.savefig(froot+"_fit_residuals.png")
           plt.close()
 
 
@@ -2279,7 +2285,7 @@ def do_photometry(
                          datafile,
                          band=band,
                          srcfile=local['out_dir']+cat_filename, # source catalog to use for fitting 
-                         file_root=local['out_dir']+"psffit",
+                         file_root=local['out_dir'] + f"{gal}_{band}",
                          pixbinfactor=1.,
                          fittype=fittype, # "amp" or "amppos" or "ampwid" but here we want None to just create residual
                          doplot=True,
