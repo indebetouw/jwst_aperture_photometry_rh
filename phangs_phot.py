@@ -42,7 +42,7 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config_pahsub.toml'     # Photometry parameters
+config_file = 'config/config_pahsub_force.toml'     # Photometry parameters
 local_file = 'config/local.toml'       # Paths to directories
 
 def load_config(config_path: str) -> dict:
@@ -126,7 +126,8 @@ def get_file(wdir, version, project, galaxy, ptype, filter):
                          filter.lower() in f.lower() and \
                          "resid" not in f.lower() and \
                          "background" not in f.lower() and \
-                         "model" not in f.lower():
+                         "model" not in f.lower() and \
+                         ("pah" in filter.lower()) == ("pah" in f.lower()):
                          plausible_files.append(os.path.join(root, f))
 
           if len(plausible_files) > 1:
@@ -569,6 +570,8 @@ def run_source_finder(img,
      sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=wcs_obj)
      sources['ra']=sk.ra
      sources['dec']=sk.dec
+     sources['ra_centroid']=sk.ra
+     sources['dec_centroid']=sk.dec
 
      if doplot:
           # Plot the image with sources 
@@ -742,7 +745,10 @@ def compute_photometry(data,
 
      if use_brightest is not False:
           # Aperture photometry of only brightest sources
-          sources = sources[np.argsort(sources['peak_value'])[::-1][:use_brightest]]
+          kbrightness = 'peak_value'
+          if kbrightness not in sources.colnames:
+               kbrightness = 'aperture_flux_mJy'
+          sources = sources[np.argsort(sources[kbrightness])[::-1][:use_brightest]]
           print(f"using only {len(sources)} sources")
 
      if isinstance(radius_sky_in , str):
@@ -765,7 +771,10 @@ def compute_photometry(data,
      # Do aperture photometry
      print()
      print(f"Doing aperture photometry for {len(sources)} sources...")
-     positions = np.transpose((sources['xcentroid'], sources['ycentroid']))
+     kx = 'xcentroid'; ky = 'ycentroid'
+     if kx not in sources.colnames or ky not in sources.colnames:
+          kx = 'xcenter'; ky = 'ycenter'
+     positions = np.transpose((sources[kx], sources[ky]))
      apertures = CircularAperture(positions, r=radius)
      aper_stats = ApertureStats(data, apertures, error=err)
      phot_full = aperture_photometry(data, apertures, error=err, method=phot_method) # Jimena also passed a mask - why?
@@ -842,9 +851,9 @@ def compute_photometry(data,
                phot_full['aperture_flux_mJy_apcorr'] = phot_full['aperture_flux_mJy'] * apcorr if apcorr.unit.is_equivalent(u.dimensionless_unscaled) else phot_full['aperture_flux_mJy'] + apcorr.value
      
      # TODO: Is there a better way to do this than a list?
-     if band.lower()=='f335m' or band.lower()=='f770w' or band.lower()=='f1000w' or band.lower()=='f1130w' or band.lower()=='f2100w':
+     if band.lower()=='f335m' or band.lower()=='f770w' or band.lower()=='f1000w' or band.lower()=='f1130w' or band.lower()=='f2100w' or "pah" in band.lower():
           phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2)
-     elif band.lower()=='f300m' or band.lower()=='f360m' or band.lower()=='f444w':
+     elif band.lower()=='f200w' or band.lower()=='f300m' or band.lower()=='f360m' or band.lower()=='f444w':
           phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2 * bkg_err_scalefactor**2)
      else:
           print(f"Band {band} not recognized for error calculation. Setting total_aperture_sum_err to max possible, sqrt(aperture_sum_err**2 + bkg_err**2).")
@@ -852,7 +861,7 @@ def compute_photometry(data,
 
      # special step for the continuum subtracted PAH bands to filter some of the poor subtractions:
      if "pah" in band.lower():
-          negative_threshold = -1
+          negative_threshold = -0.5
           z_neg = np.where(phot_full['aperture_min'] < negative_threshold)[0]
           phot_full['aperture_sum_err'][z_neg] *= 3
           if len(z_neg) > 0:
@@ -952,8 +961,8 @@ def compute_photometry(data,
                )
                ax.imshow(data, origin='lower', cmap='inferno', norm=norm_cutout)
                # Plot horizontal and vertical lines through the center of the cutout
-               ax.axhline(y, color='cyan', ls='--', lw=1.0)
-               ax.axvline(x, color='cyan', ls='--', lw=1.0)
+               # ax.axhline(y, color='cyan', ls='--', lw=1.0)
+               # ax.axvline(x, color='cyan', ls='--', lw=1.0)
                # Draw a circle with radius equal to the optimal aperture radius
                circle = plt.Circle((x, y), radius, edgecolor='red', facecolor='none', lw=1.5, alpha=1.0)
                sky_in_circle = plt.Circle((x, y), radius_sky_in, edgecolor='magenta', facecolor='none', lw=1.5, alpha=0.5)
@@ -971,7 +980,7 @@ def compute_photometry(data,
                ax.text(0.08, 0.93, f"{i+1}", color='cyan', fontsize=8, ha='center', va='center', transform=ax.transAxes)
                # Select all sources in the catalog that are within the cutout region
                sources_in_cutout = phot_full[(phot_full['xcenter'] > x_min) & (phot_full['xcenter'] < x_max) & (phot_full['ycenter'] > y_min) & (phot_full['ycenter'] < y_max)]
-               ax.scatter(sources_in_cutout['xcenter'], sources_in_cutout['ycenter'], s=50, edgecolor='cyan', facecolor='none', lw=1.0)
+               ax.scatter(sources_in_cutout['xcenter'], sources_in_cutout['ycenter'], s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
           plt.savefig(out_dir+f"/{gal}_{band}_cutouts_brightest_r{radius:4.2f}.png", dpi=400)
           plt.close(fig)
 
@@ -1926,6 +1935,8 @@ def fit_and_subtract(infile, # input mosaic image
 
 
      if fittype is not None:
+          srclist['ra'] = srcra
+          srclist['dec'] = srcde
           srclist.add_columns([newflux,jout,fitted],names=[kflux+"_refit_"+fittype,('jout_%4.1f_'%wave)+fittype,('nfitted_%4.1f_'%wave)+fittype])
           srclist.write(froot+"_refit.csv",overwrite=True)
      
@@ -2168,8 +2179,21 @@ def do_photometry(
                     # but that might be more work than just doing this here.
                     if 'dolphot' in cat_filename.lower():
                          print ("Using the dolphot catalog.")
-                         wcs = WCS(header)
-                         xcentroid, ycentroid = wcs.all_world2pix(sources['RA_deg'], sources['Dec_deg'], 0)
+                         current_wcs = WCS(header)
+                         xcentroid, ycentroid = current_wcs.all_world2pix(sources['RA_deg'], sources['Dec_deg'], 0)
+                         sources['xcentroid'] = xcentroid
+                         sources['ycentroid'] = ycentroid
+                    elif 'ra' in sources.colnames and 'dec' in sources.colnames:
+                         with warnings.catch_warnings():
+                              warnings.filterwarnings(
+                                   "ignore",
+                                   message=r".*OBSGEO.*",
+                                   category=FITSFixedWarning,
+                              )
+                              current_wcs = WCS(header)
+                         xcentroid, ycentroid = current_wcs.all_world2pix(
+                              sources['ra'], sources['dec'], 0
+                         )
                          sources['xcentroid'] = xcentroid
                          sources['ycentroid'] = ycentroid
 
