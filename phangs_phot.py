@@ -20,7 +20,7 @@ from astropy import wcs
 from astropy.wcs import WCS, FITSFixedWarning
 from astropy.io import fits
 from astropy.stats import SigmaClip
-from astropy.table import Table, join, hstack
+from astropy.table import Table, QTable, hstack
 from astropy.coordinates import SkyCoord, match_coordinates_sky
 from astropy.visualization import ImageNormalize, SqrtStretch, LogStretch
 from scipy.ndimage import gaussian_filter as gf
@@ -42,7 +42,7 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config_pahsub_force.toml'     # Photometry parameters
+config_file = 'config/config_pahsub.toml'     # Photometry parameters
 local_file = 'config/local.toml'       # Paths to directories
 
 def load_config(config_path: str) -> dict:
@@ -155,7 +155,7 @@ def convert_aperture_sum_Jy_per_sr_to_abmag(aperture_sum_jy_sr, header):
           print(f"Warning: BUNIT in header is {header.get('BUNIT', 'unknown')}, but expected Jy/sr. Applying conversion to MJy/sr.")
           aperture_sum_jy_sr = np.array(aperture_sum_jy_sr) * 1e6
      elif not header.get('BUNIT', '').lower() in ['jy/sr', 'jy/steradian']:
-          raise ValueError("Input aperture sum must be in Jy/sr or MJy/sr for conversion to AB magnitudes.")
+          print("WARNING: Input aperture sum must be in Jy/sr or MJy/sr for conversion to AB magnitudes.")
     
      # Get pixel area in steradians from header
      pix_area_sr = get_pixarea_in_sr(header)
@@ -197,20 +197,11 @@ def get_pixarea_in_sr(header):
         return float(header['PIXAR_SR'])
     
     # If keyword is not found, then we can try to compute it from CDELT or CD matrix
-    elif ('CDELT1' in header) and ('CDELT2' in header):
-        print("Warning: PIXAR_SR keyword not found in header. Computing pixel area from WCS information.")
-        area_deg2 = np.abs(float(header['CDELT1']) * float(header['CDELT2']))
-        if np.isfinite(area_deg2) and (area_deg2 > 0):
-            return float((area_deg2 * u.deg**2).to(u.sr).value)
-    elif 'CD1_1' in header:
-        print("Warning: PIXAR_SR keyword not found in header. Computing pixel area from WCS information.")
-        cd = np.array([[float(header['CD1_1']), float(header['CD1_2'])],
-                        [float(header['CD2_1']), float(header['CD2_2'])]])
-        area_deg2 = np.abs(np.linalg.det(cd))
-        return float((area_deg2 * u.deg**2).to(u.sr).value)
-    # And if we can't do either of those...
+    # unless there is e.g. a PC matrix; 
+    # so its better to just use wcs
     else:
-        raise ValueError("could not get pixel area in steradians from header/WCS")
+         w=wcs.WCS(header) 
+         return(w.proj_plane_pixel_area().to(u.sr).value)
      
 
 
@@ -234,16 +225,22 @@ def open_jwst(filename, get_coverage=True):
      img_file = None
      err_file = None
 
+     extensions_to_try = ['SCI', 'PRIMARY']
+
      # Open the file and use extensions to assign data and header
      with fits.open(filename) as hdul:
-          img_file = hdul['SCI']
-          img = img_file.data
-          header = img_file.header
+          for ext in extensions_to_try:
+               if ext in hdul:
+                    img_file = hdul[ext]
+                    # TODO do we want the primary header or the extension header? prinanly the extension header for BUNIT
+                    header = img_file.header
+                    img = img_file.data * u.Unit(header['BUNIT'])
+                    break
           # Error
           hdunames = [hdu.name for hdu in hdul]
           if 'ERR' in hdunames:
                err_file = hdul['ERR']
-               err = err_file.data
+               err = err_file.data * u.Unit(header['BUNIT'])
           else:
                # estimate error from image - parameters are from Jimena's HST phot, probably need tuning for JWST
                sigma_clip = SigmaClip(sigma=5., maxiters=10)
@@ -259,15 +256,22 @@ def open_jwst(filename, get_coverage=True):
                     coverage_mask=coverage_mask,
                )
                # 3rd parameter = Ratio of counts (e.g., electrons or photons) to the data units         
-               err = calc_total_error(img, bkg.background, effective_gain = header['XPOSURE']/header['PHOTMJSR']) 
-               # TODO double check units of calc_total_error() 
+               # TODO double check gain units, and also make it work for other instruments besides JWST
+               if img.unit.is_equivalent(u.MJy / u.sr):
+                    # workaround for numpy bug with units fixed but need python 3.15 I think
+                    err = np.asarray(calc_total_error(img.value, bkg.background.value, 
+                                      effective_gain = header['XPOSURE']/header['PHOTMJSR'] )) * img.unit
+               else:
+                    print("WARNING: Image unit is not MJy/sr, using effective gain=1")
+                    err = np.asarray(calc_total_error(img.value, bkg.background.value, 
+                                      effective_gain = 1.0 ) ) * img.unit
                err_file = "Estimated from image"
      # Check the names of the image and error extensions 
      print(f"Image file: {img_file}")
      print(f"Error file: {err_file}")
 
      # Handle NaNs and zeros
-     snr_map = np.full_like(img, np.nan)
+     snr_map = np.full_like(img.value, np.nan)
      valid = (np.isfinite(img)) & (np.isfinite(err)) & (err > 0)
      snr_map[valid] = img[valid] / err[valid]
 
@@ -365,7 +369,7 @@ def calculate_bkg(img,
           coverage_mask=coverage_mask,
      )
 
-     rms_map = np.array(bkg.background_rms, dtype=float)
+     rms_map = bkg.background_rms
      valid_rms = (~coverage_mask) & np.isfinite(rms_map) & (rms_map > 0)
      # print(f"bkg array {bkg.background}")
      bkg_rms = np.nanmedian(rms_map[valid_rms]) if np.any(valid_rms) else np.nan
@@ -385,23 +389,23 @@ def calculate_bkg(img,
      if doplot:
           # Plot the image, background, and background-subtracted image
           fig, ax = plt.subplots(1, 3, figsize=(18, 6))
-          norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00),
-                                vmax=np.nanpercentile(img, 99.99),
+          norm = ImageNormalize(vmin=np.nanpercentile(img.value, 25.00),
+                                vmax=np.nanpercentile(img.value, 99.99),
                                 stretch=LogStretch())
-          ax[0].imshow(img, origin='lower', cmap='inferno', norm=norm)
+          ax[0].imshow(img.value, origin='lower', cmap='inferno', norm=norm)
           ax[0].set_title(f"{gal.upper()} {band.upper()} mosaic")
           # TODO: gal and band as global properties
-          ax[1].imshow(bkg.background, origin='lower', cmap='inferno')
+          ax[1].imshow(bkg.background.value, origin='lower', cmap='inferno')
           ax[1].set_title("Estimated background")
           img_sub = img - bkg.background
-          norm_sub = ImageNormalize(vmin=np.nanpercentile(img_sub, 25.00),
-                                    vmax=np.nanpercentile(img_sub, 99.99),
+          norm_sub = ImageNormalize(vmin=np.nanpercentile(img_sub.value, 25.00),
+                                    vmax=np.nanpercentile(img_sub.value, 99.99),
                                     stretch=LogStretch())
-          ax[2].imshow(img_sub, origin='lower', cmap='inferno', norm=norm_sub)
+          ax[2].imshow(img_sub.value, origin='lower', cmap='inferno', norm=norm_sub)
           ax[2].set_title("Background-subtracted image")
           for a in ax:
                im = a.images[0]
-               plt.colorbar(im, ax=a, pad=0.01, fraction=0.05)
+               plt.colorbar(im, ax=a, pad=0.01, fraction=0.05) 
           plt.savefig(out_dir + f"/{gal}_{band}_background_subtraction.png", dpi=300)
           plt.close(fig)
 
@@ -446,7 +450,7 @@ def subtract_bkg(image_path,
           print(f"Background file found on disk for {image_path}.")
 
      img, err, snr_map, coverage_mask, header = open_jwst(image_path)
-     bkg_background = fits.getdata(background_path)
+     bkg_background = fits.getdata(background_path) * img.unit
      bkg_mean = np.nanmean(bkg_background)
      bkg_rms = np.nanstd(bkg_background)
      img_sub = img - bkg_background
@@ -540,7 +544,7 @@ def run_source_finder(img,
           )
           # For sources where the centroid could not be determined,
           # use the position of the peak instead.
-          # RI: this does end up keeping sources on the edges which we don't want
+          # RI TODO: this does end up keeping sources on the edges which we don't want
           #----------------------------------------
           z=np.where(np.isnan(sources['x_centroid']))[0]
           if len(z)>0:
@@ -568,18 +572,21 @@ def run_source_finder(img,
           )
           wcs_obj = WCS(header)
      sk = wcs.utils.pixel_to_skycoord(sources['xcentroid'], sources['ycentroid'], wcs=wcs_obj)
-     sources['ra']=sk.ra
-     sources['dec']=sk.dec
-     sources['ra_centroid']=sk.ra
-     sources['dec_centroid']=sk.dec
+
+     # sources is a QTable and radec will have u.deg
+     sources['ra'] = sk.ra
+     sources['dec'] = sk.dec
+     sources['ra_centroid'] = sk.ra
+     sources['dec_centroid'] = sk.dec
 
      if doplot:
           # Plot the image with sources 
           fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-          norm = ImageNormalize(vmin=np.nanpercentile(img, 25.00), 
-                                vmax=np.nanpercentile(img, 99.99), 
+          norm = ImageNormalize(vmin=np.nanpercentile(img.value, 25.00), 
+                                vmax=np.nanpercentile(img.value, 99.99), 
                                 stretch=LogStretch())
-          ax.imshow(img, origin='lower', cmap='inferno', norm=norm)
+          # matplotlib tries to match the units of the color bar with those of the image, which can be error-prone
+          ax.imshow(img.value, origin='lower', cmap='inferno', norm=norm)
           ax.set_title(f"{gal.upper()} {band.upper()} mosaic")
           ax.scatter(sources['xcentroid'], sources['ycentroid'], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.2)
           im = ax.images[0]
@@ -606,7 +613,7 @@ def run_source_finder(img,
           if "find_cat_filename" in kwargs:
                cat_name = kwargs["find_cat_filename"]
           else:
-               cat_name = f"{gal}_jwst_{band}_find_cat." + cat_filetype
+               cat_name = f"{gal}_{band}_find_cat." + cat_filetype
           print(f"Writing catalog to {out_dir + cat_name}")
           sources.write(out_dir + cat_name, overwrite=overwrite)
 
@@ -695,6 +702,64 @@ def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, doplo
      return r_opt
 
 
+
+def im2flux(sum,header):
+     # convert from image units per pixel to flux units
+     # returns value with units
+     bunit = header['BUNIT']
+     with warnings.catch_warnings():
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*OBSGEO.*",
+               category=FITSFixedWarning,
+          )
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*datfix.*",
+               category=FITSFixedWarning,
+          )
+          wcs = WCS(header)
+     if bunit == 'MJy/sr':
+          Mjy = sum * wcs.proj_plane_pixel_area() # proj_plane_pixel_area has units of deg2 so should cancel the sr but is astropy smart enough?
+          return Mjy.to(u.mJy) 
+     elif bunit == "erg/s/cm2/arcsec2":
+          flux = sum * wcs.proj_plane_pixel_area() 
+          return flux.to(u.erg / (u.s * u.cm**2))
+     else:
+          raise ValueError(f"Unsupported image units: {bunit}")
+
+
+def flux2im(flux,header):
+     # convert from flux to image units times pixels
+     if not isinstance(flux, u.Quantity):
+          raise TypeError("flux must be an astropy.units.Quantity")
+     bunit = header['BUNIT']
+     with warnings.catch_warnings():
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*OBSGEO.*",
+               category=FITSFixedWarning,
+          )
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*datfix.*",
+               category=FITSFixedWarning,
+          )
+          wcs = WCS(header)
+     if bunit == 'MJy/sr':
+          flux_mjy = flux.to(u.mJy) # will raise exception if not possible
+          sum = flux_mjy / wcs.proj_plane_pixel_area()
+          return sum.to(u.MJy / u.sr)
+     elif bunit == "erg/s/cm2/arcsec2":
+          flux = flux.to(u.erg / (u.s * u.cm**2)) # will raise exception if not possible
+          sum = flux / wcs.proj_plane_pixel_area()
+          return sum.to(u.erg / (u.s * u.cm**2 * u.arcsec**2))
+     else:
+          raise ValueError(f"Unsupported image units: {bunit}")
+
+
+
+
 # ------- Main photometry function ------------------------------------------------ 
 def compute_photometry(data, 
           err,
@@ -732,7 +797,7 @@ def compute_photometry(data,
           maxiters_for_bkg_clip: maximum iterations for sigma clipping of background
           phot_method: method to use for photometry (e.g., 'exact', 'subpixel', etc.)
           doplot: if True, generate diagnostic plots
-          write: if True, write catalog to out_dir with name {gal}_jwst_{band}_cat.fits
+          write: if True, write catalog to out_dir with name {gal}_{band}_cat.fits
           phot_cat_filename: filename for the output photometry catalog
           overwrite: if True, overwrite existing catalog file
           apcorr_method: method for aperture correction (e.g., 'psf')
@@ -747,7 +812,10 @@ def compute_photometry(data,
           # Aperture photometry of only brightest sources
           kbrightness = 'peak_value'
           if kbrightness not in sources.colnames:
-               kbrightness = 'aperture_flux_mJy'
+               # this is the use case of using a previous photometry catalog for forced photometry
+               # on a new image (you put that catalog in "find_cat_filename")
+               # these two cases could be generalized to find a generic flux measurement in the file 
+               kbrightness = 'aperture_flux'
           sources = sources[np.argsort(sources[kbrightness])[::-1][:use_brightest]]
           print(f"using only {len(sources)} sources")
 
@@ -793,23 +861,16 @@ def compute_photometry(data,
      bkg_median = bkg_stats.median
      bkg_median[np.isnan(bkg_median)]=0
 
-     # Error on the flux due to background estimation uncertainty.
-     # The worst case is that of structured background, where the error scales with the area of the aperture.  
-     # The best case is that of unstructured background, where the error scales with the square root of the area of the aperture.  
-     bkg_err_MJysrpix = bkg_stats.std * aper_stats.sum_aper_area.value
-     bkg_err_mJy = bkg_err_MJysrpix * get_pixarea_in_sr(header) * 1e9
-     bkg_err_scalefactor = np.sqrt(0.5*np.pi / bkg_stats.sum_aper_area.value)  # scale factor for background error based on area of annulus 
-
      # Subtract background from aperture sum
-     phot_full['aperture_flux_mJy'] = phot_full['aperture_sum'] * get_pixarea_in_sr(header) * 1e9
+     phot_full['aperture_flux'] = im2flux( phot_full['aperture_sum'], header )
      if local_bkg_subtract:
-          phot_full['bkg_median_MJysr'] = bkg_median
-          phot_full['bkg_flux_mJy'] = bkg_median * aper_stats.sum_aper_area.value * get_pixarea_in_sr(header) * 1e9
-          phot_full['aperture_flux_mJy'] -= phot_full['bkg_flux_mJy']
+          phot_full['bkg_median'] = bkg_median
+          phot_full['bkg_flux'] = im2flux( bkg_median * aper_stats.sum_aper_area.value, header )
+          phot_full['aperture_flux'] -= phot_full['bkg_flux']
      
      # Copy source-finder morphology columns
      if 'flux' in sources.colnames:  # it won't be there for findpeaks method.  TODO could be added in find step
-          phot_full['finder_flux'] = np.asarray(sources['flux'])
+          phot_full['finder_flux'] = im2flux( sources['flux'], header )
      if 'sharpness' in sources.colnames:
           phot_full['sharpness'] = np.asarray(sources['sharpness'])
      if 'roundness' in sources.colnames:
@@ -817,9 +878,9 @@ def compute_photometry(data,
      if 'mag' in sources.colnames:
           phot_full['finder_mag'] = np.asarray(sources['mag'])
      if 'peak' in sources.colnames:
-          phot_full['peak'] = np.asarray(sources['peak'])
+          phot_full['peak'] = sources['peak'] # keep image units on "peak"
      elif 'peak_value' in sources.colnames: 
-          phot_full['peak'] = np.asarray(sources['peak_value'])   # TODO change peakfinder output to have peak instead of peak_value
+          phot_full['peak'] = sources['peak_value']   # TODO change peakfinder output to have peak instead of peak_value
 
      # Include ra, dec
      with warnings.catch_warnings():
@@ -838,7 +899,6 @@ def compute_photometry(data,
           phot_full['finder_flux_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['finder_flux'], header=header)
      # Aperture sum from circular aperture photometry (converted to AB magnitudes)
      phot_full['aperture_sum_abmag'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header)
-     # TODO add finder_flux_mjy
 
      if apcorr_method != None:
           if apcorr.unit.is_equivalent(u.dimensionless_unscaled):
@@ -847,17 +907,9 @@ def compute_photometry(data,
                phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header) + apcorr.value
           # add aperture correction to aperture_flux_mJy 
           # TODO do we need to multiply the error by the apcorr? Jimena did not.
-          if 'aperture_flux_mJy' in phot_full.colnames:
-               phot_full['aperture_flux_mJy_apcorr'] = phot_full['aperture_flux_mJy'] * apcorr if apcorr.unit.is_equivalent(u.dimensionless_unscaled) else phot_full['aperture_flux_mJy'] + apcorr.value
-     
-     # TODO: Is there a better way to do this than a list?
-     if band.lower()=='f335m' or band.lower()=='f770w' or band.lower()=='f1000w' or band.lower()=='f1130w' or band.lower()=='f2100w' or "pah" in band.lower():
-          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2)
-     elif band.lower()=='f200w' or band.lower()=='f300m' or band.lower()=='f360m' or band.lower()=='f444w':
-          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2 * bkg_err_scalefactor**2)
-     else:
-          print(f"Band {band} not recognized for error calculation. Setting total_aperture_sum_err to max possible, sqrt(aperture_sum_err**2 + bkg_err**2).")
-          phot_full['total_aperture_sum_err'] = np.sqrt(phot_full['aperture_sum_err']**2 + bkg_err_MJysrpix**2)
+          if 'aperture_flux' in phot_full.colnames:
+               phot_full['aperture_flux_apcorr'] = phot_full['aperture_flux'] * apcorr if apcorr.unit.is_equivalent(u.dimensionless_unscaled) else phot_full['aperture_flux'] + apcorr.value
+
 
      # special step for the continuum subtracted PAH bands to filter some of the poor subtractions:
      if "pah" in band.lower():
@@ -867,29 +919,38 @@ def compute_photometry(data,
           if len(z_neg) > 0:
                print(f"Found {len(z_neg)} sources with aperture_min < {negative_threshold}. Increased their aperture_sum_err by a factor of 3.")
 
+     # Error on the flux due to background estimation uncertainty.
+     # The worst case is that of structured background, where the error scales with the area of the aperture.  
+     # The best case is that of unstructured background, where the error scales with the square root of the area of the aperture.  
+     bkg_err_scalefactor = np.sqrt(0.5*np.pi / bkg_stats.sum_aper_area.value)  # scale factor for background error based on area of annulus 
 
-     # Add the errors
-     phot_full['bkg_err_mJy'] = np.asarray(bkg_err_mJy)
-     phot_full['poisson_err_mJy'] = np.asarray(phot_full['aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
-     phot_full['tot_err_mJy'] = np.asarray(phot_full['total_aperture_sum_err'] * get_pixarea_in_sr(header) * 1e9)
+     phot_full['bkg_err'] = im2flux( bkg_stats.std * aper_stats.sum_aper_area.value, header )
+     phot_full['poisson_err'] = im2flux( phot_full['aperture_sum_err'], header )
  
-     # Print the column names of the photometry table
-     # print(phot_full.colnames)
+     # TODO: Is there a better way to do this than a list?
+     if band.lower()=='f335m' or band.lower()=='f770w' or band.lower()=='f1000w' or band.lower()=='f1130w' or band.lower()=='f2100w' or "pah" in band.lower():
+          phot_full['total_err'] = np.sqrt(phot_full['poisson_err']**2 + phot_full['bkg_err']**2 )
+     elif band.lower()=='f200w' or band.lower()=='f300m' or band.lower()=='f360m' or band.lower()=='f444w':
+          phot_full['total_err'] = np.sqrt(phot_full['poisson_err']**2 + (phot_full['bkg_err']*bkg_err_scalefactor)**2)
+     else:
+          print(f"Band {band} not recognized for error calculation. Setting total_err to max possible, sqrt(poisson_err**2 + bkg_err**2).")
+          phot_full['total_err'] = np.sqrt(phot_full['poisson_err']**2 + phot_full['bkg_err']**2)
+
 
      # Write the catalog if requested
      if write:
           if phot_cat_filename is None:
-               phot_cat_filename = f"{gal}_jwst_{band}_phot_cat_r{radius:4.2f}." + cat_filetype
+               phot_cat_filename = f"{gal}_{band}_phot_cat_r{radius:4.2f}." + cat_filetype
           print(f"Writing catalog to {out_dir + phot_cat_filename}")
           phot_full.write(out_dir + phot_cat_filename, overwrite=overwrite)
 
      if doplot:
           # plot photometry results
           fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-          ax.plot(phot_full['aperture_flux_mJy'], phot_full['bkg_err_mJy']/phot_full['aperture_flux_mJy'], 'o', markersize=1, alpha=0.5, label="bg")
-          ax.plot(phot_full['aperture_flux_mJy'], phot_full['poisson_err_mJy']/phot_full['aperture_flux_mJy'], 'o', markersize=1, alpha=0.5, label="poisson")
+          ax.plot(phot_full['aperture_flux'], phot_full['bkg_err']/phot_full['aperture_flux'], 'o', markersize=1, alpha=0.5, label="bg")
+          ax.plot(phot_full['aperture_flux'], phot_full['poisson_err']/phot_full['aperture_flux'], 'o', markersize=1, alpha=0.5, label="poisson")
           ax.legend(loc="best",prop={"size":8})
-          ax.set_xlabel("Flux (mJy)")
+          ax.set_xlabel(f"Flux ({phot_full['aperture_flux'].unit})")
           ax.set_ylabel("Error/Flux")
           plt.xscale("log")
           plt.yscale("log")
@@ -898,16 +959,16 @@ def compute_photometry(data,
 
           # Plot the image with significant sources 
           fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-          norm = ImageNormalize(vmin=np.nanpercentile(data, 25.00), 
-                                vmax=np.nanpercentile(data, 99.99), 
+          norm = ImageNormalize(vmin=np.nanpercentile(data.value, 25.00), 
+                                vmax=np.nanpercentile(data.value, 99.99), 
                                 stretch=LogStretch())
-          ax.imshow(data, origin='lower', cmap='inferno', norm=norm)
+          ax.imshow(data.value, origin='lower', cmap='inferno', norm=norm)
           ax.set_title(f"{gal.upper()} {band.upper()}")
-          # z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
+          # z=np.where(phot_full['aperture_flux']/phot_full['poisson_err']>5)[0]
           # ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
           label_low_snr_values = False  # Set to True to label each red low-SNR source with its SNR value
           err_threshold = 1.5
-          snr = phot_full['aperture_flux_mJy'] / phot_full['tot_err_mJy']
+          snr = phot_full['aperture_flux'] / phot_full['total_err']
           hi_label_added = False
           lo_label_added = False
           for idx in range(len(phot_full)):
@@ -919,7 +980,7 @@ def compute_photometry(data,
                     edgecolor = 'k'
                     label = None if hi_label_added else f"SNR > {err_threshold}"
                     hi_label_added = True
-               elif snr[idx] >0 and phot_full['aperture_flux_mJy'][idx]/phot_full['poisson_err_mJy'][idx]>5:
+               elif snr[idx] >0 and phot_full['aperture_flux'][idx]/phot_full['poisson_err'][idx]>5:
                     edgecolor = 'g'
                     label = None if lo_label_added else f"SNR < {err_threshold}"
                     lo_label_added = True
@@ -929,7 +990,7 @@ def compute_photometry(data,
                ax.add_patch(circ)
                if snr[idx] < err_threshold and label_low_snr_values:
                     #ax.text(x + radius * 1.2, y + radius * 1.2, f"{snr[idx]:.1f}", color='g', fontsize=8, ha='left', va='bottom')
-                    ax.text(x + radius * 1.2, y + radius * 1.2, f"{phot_full['aperture_flux_mJy'][idx]/phot_full['poisson_err_mJy'][idx]:.1f}", color='g', fontsize=8, ha='left', va='bottom')
+                    ax.text(x + radius * 1.2, y + radius * 1.2, f"{phot_full['aperture_flux'][idx]/phot_full['poisson_err'][idx]:.1f}", color='g', fontsize=8, ha='left', va='bottom')
                     
           ax.legend(loc="best",prop={"size":8})
           im = ax.images[0]
@@ -955,11 +1016,11 @@ def compute_photometry(data,
                x_min, x_max = int(x - cutout_size), int(x + cutout_size)
                y_min, y_max = int(y - cutout_size), int(y + cutout_size)
                cutout = data[y_min:y_max, x_min:x_max]
-               norm_cutout = ImageNormalize(vmin=np.nanpercentile(cutout, 0), 
-                                            vmax=np.nanpercentile(cutout, 100),
+               norm_cutout = ImageNormalize(vmin=np.nanpercentile(cutout.value, 0), 
+                                            vmax=np.nanpercentile(cutout.value, 100),
                                             # stretch=SqrtStretch()
                )
-               ax.imshow(data, origin='lower', cmap='inferno', norm=norm_cutout)
+               ax.imshow(data.value, origin='lower', cmap='inferno', norm=norm_cutout)
                # Plot horizontal and vertical lines through the center of the cutout
                # ax.axhline(y, color='cyan', ls='--', lw=1.0)
                # ax.axvline(x, color='cyan', ls='--', lw=1.0)
@@ -976,8 +1037,12 @@ def compute_photometry(data,
                # render the cutout and subtract x_min, y_min from sources_in_cutout positions
                ax.set_xlim(x_min, x_max)
                ax.set_ylim(y_min, y_max)
-               ax.text(0.5, 0.9, f"{row['aperture_flux_mJy']*1000:.1f}uJy ({row['bkg_flux_mJy']*1000:.2f})", color='white', fontsize=8, ha='center', va='center', transform=ax.transAxes)
-               ax.text(0.08, 0.93, f"{i+1}", color='cyan', fontsize=8, ha='center', va='center', transform=ax.transAxes)
+               if row['aperture_flux'].unit == u.mJy:
+                    ax.text(0.5, 0.9, f"{row['aperture_flux'].value*1000:.1f}uJy ({row['bkg_flux'].value*1000:.2f})", color='white', fontsize=8, ha='center', va='center', transform=ax.transAxes)               
+               else:
+                    ax.text(0.5, 0.9, f"{row['aperture_flux']:.1f} ({row['bkg_flux'].value:.2f})", color='white', fontsize=8, ha='center', va='center', transform=ax.transAxes)
+               #ax.text(0.08, 0.93, f"{i+1}", color='cyan', fontsize=8, ha='center', va='center', transform=ax.transAxes)
+               ax.text(0.08, 0.05, f"{x:.0f},{y:.0f}", color='cyan', fontsize=8, ha='left', va='center', transform=ax.transAxes)
                # Select all sources in the catalog that are within the cutout region
                sources_in_cutout = phot_full[(phot_full['xcenter'] > x_min) & (phot_full['xcenter'] < x_max) & (phot_full['ycenter'] > y_min) & (phot_full['ycenter'] < y_max)]
                ax.scatter(sources_in_cutout['xcenter'], sources_in_cutout['ycenter'], s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
@@ -1174,13 +1239,11 @@ def residual(params,imclip,return_type,psfcore,scor_pix,sfitrgn_pix,njparams):
      # the "f" parameters are the fluxes of the main and neighboring sources
      fparms=[x for x in params.keys() if x[0]=='f']
 
-     # TODO copy the imclip upstream, so this can just imclip without copying it every iteration
-
      nsrc=len(fparms) 
      if return_type == "substars":
-          outclip = imclip.copy()
+          outclip = imclip # .copy()
      elif return_type == "suball":
-          outclip = imclip.copy() - params['bg']    
+          outclip = imclip - params['bg'] 
      elif return_type == "stars":
           outclip = np.zeros(imclip.shape) 
      else:
@@ -1339,7 +1402,6 @@ def get_apcorr_from_psf(band,r_ap,r_sky_in,r_sky_out):
 #=====================================================================================
 def fit_and_subtract(infile, # input mosaic image 
                     band="pah33",
-                    whathdu='SCI', # which HDU to use for the image - TODO refactor into open_jwst
                     srcfile=None, # source catalog to use for fitting 
                     file_root="psffit",
                     pixbinfactor=1.,
@@ -1371,7 +1433,6 @@ def fit_and_subtract(infile, # input mosaic image
      plotborder=0 # fraction of sfitrgn_pix to include around the border when displaying the region
      alpha=0.5 # for overplotting sources
      larger_sfitrgn_pix=False
-     tomjy=1.0 # convert from input catalog units to mJy TODO make this automatic based on the input catalog units
      debug=False # stop every source and show neighbors etc
 
      
@@ -1383,8 +1444,17 @@ def fit_and_subtract(infile, # input mosaic image
                message=r".*OBSGEO.*",
                category=FITSFixedWarning,
           )
+          warnings.filterwarnings(
+               "ignore",
+               message=r".*datfix.*",
+               category=FITSFixedWarning,
+          )
+          for whathdu in ['SCI','PRIMARY']:
+               if whathdu in fits.open(infile):
+                    break
           inhdu = fits.open(infile)[whathdu]
-          inwcs = wcs.WCS(inhdu.header)
+          header = inhdu.header
+          inwcs = wcs.WCS(header)
 
      # pixel scale in arcsec/pixel
      pixsize = wcs.utils.proj_plane_pixel_scales(inwcs) * 3600
@@ -1408,19 +1478,32 @@ def fit_and_subtract(infile, # input mosaic image
      
      
      #---------------------------------------------
-     # read in input source list
-     srclist=Table.read(srcfile,format="ascii")
+     # read in input source list and image
+     srclist=QTable.read(srcfile,format="ascii")
      
      # order from brightest to faintest
      # TODO refactor to do this only in the fit loop, to not disorder the actual list
      # and keep it identical to the input order
-     u=np.argsort(srclist[kflux])[::-1]
+     sortidx=np.argsort(srclist[kflux])[::-1]
      
      nsrc=len(srclist)
      srcra=srclist[kra].data
      srcde=srclist[kde].data
      
-     
+     if doregion:
+          froot+="_region"
+          cdec=np.cos(rd0[1]*np.pi/180)
+          subim_xy=np.int32(inwcs.wcs_world2pix([[rd0[0]-d/cdec,rd0[1]-d],[rd0[0]+d/cdec,rd0[1]+d]],0))
+          if larger_sfitrgn_pix: # does this work?  seems off?
+               subim_xy+=np.array([[sfitrgn_pix[1]//4,-sfitrgn_pix[0]//4],[-sfitrgn_pix[1]//4,sfitrgn_pix[0]//4]])   
+          subim=inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]
+     else:
+          subim=inhdu.data
+          subim_xy=[[subim.shape[1],0],[0,subim.shape[0]]]
+
+     subim *= u.Unit(header['BUNIT'])
+
+
      #---------------------------------------------
      # set up psfs - expects 4 x oversampled psf in the file
      psffile = get_psf_file(band)
@@ -1443,7 +1526,10 @@ def fit_and_subtract(infile, # input mosaic image
      p=np.zeros([nbroad,s[0],s[1]]) 
      
      # ROTATE psf to the correct position angle
-     psfdat=rotate(psfdat,-inhdu.header['pa_aper'],reshape=False)
+     if 'pa_aper' in inhdu.header:
+          psfdat=rotate(psfdat,-inhdu.header['pa_aper'],reshape=False)
+     else:
+          print("WARNING: can't rotate PSF because image position angle not found in header.")
      
      for k in range(nbroad):
           p[k]=gf(psfdat,widths[k])
@@ -1470,10 +1556,10 @@ def fit_and_subtract(infile, # input mosaic image
      # distance to the nearest source
      nearest=np.zeros(nsrc)
      # fitted local background/ floor level
-     bgfit=np.zeros(nsrc)
+     bgfit=np.zeros(nsrc) * subim.unit
 
      # the new fitted flux (will be filled during fitting)
-     newflux=srclist[kflux].data.copy()
+     newflux=srclist[kflux].copy()
      
      # what is distance of proximity that sources have to be fit together?
      # use 2*fwhm
@@ -1515,28 +1601,17 @@ def fit_and_subtract(infile, # input mosaic image
           raise ValueError("sfitrgn_pix is odd")
      
      
-     if doregion:
-          froot+="_region"
-          cdec=np.cos(rd0[1]*np.pi/180)
-          subim_xy=np.int32(inwcs.wcs_world2pix([[rd0[0]-d/cdec,rd0[1]-d],[rd0[0]+d/cdec,rd0[1]+d]],0))
-          if larger_sfitrgn_pix: # does this work?  seems off?
-               subim_xy+=np.array([[sfitrgn_pix[1]//4,-sfitrgn_pix[0]//4],[-sfitrgn_pix[1]//4,sfitrgn_pix[0]//4]])   
-          subim=inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]
-     else:
-          subim=inhdu.data
-          subim_xy=[[subim.shape[1],0],[0,subim.shape[0]]]
-
      # initialize the residual image for fitting, if there is going to actually be any fitting.
      if fittype is not None:
-          resid=subim.copy()
-          model=np.zeros(subim.shape)
+          resid=subim.copy() 
+          model=np.zeros_like(subim)
      # params dx,dy are offsets from the central pixel of the stack for each src
      # with psfdat in hand, we go to closest quarter-pixels in the residual image
           
      # this will store the residual from photometry before fitting i.e. from the app phot
      resid_nofit=subim.copy()
      # this will just be the stars, using the original photometry
-     model_nofit=np.zeros(subim.shape)
+     model_nofit=np.zeros_like(subim)
      
      
      
@@ -1548,11 +1623,11 @@ def fit_and_subtract(infile, # input mosaic image
           plt.clf()
           plt.subplots_adjust(top=0.95,bottom=0.1,left=0.1,right=0.98)
           plt.subplot(2,2,1)
-          norm = ImageNormalize(vmin=np.nanpercentile(subim, 10),
-                                vmax=np.nanpercentile(subim, 99.99),
+          norm = ImageNormalize(vmin=np.nanpercentile(subim.value, 10),
+                                vmax=np.nanpercentile(subim.value, 99.99),
                                 stretch=LogStretch())
           cmap4ims = "viridis"
-          plt.imshow(subim, origin='lower', cmap=cmap4ims, norm=norm)
+          plt.imshow(subim.value, origin='lower', cmap=cmap4ims, norm=norm)
           if doregion:
                ax=plt.gca()
                #ax.use_sticky_edges=False
@@ -1567,7 +1642,8 @@ def fit_and_subtract(infile, # input mosaic image
           plt.xticks([])
                
      # open a ds9 output file
-     ds9reg=open(f"{srcfile[:-4]}.reg","w")
+     # TODO this assumes an extension of 5 characters (e.g., ".ecsv") for the source file
+     ds9reg=open(f"{srcfile[:-5]}.reg","w")
      ds9reg.write("fk5\n")
      
      th=np.arange(21)/10*np.pi
@@ -1579,12 +1655,13 @@ def fit_and_subtract(infile, # input mosaic image
      # the loop over sources
      for i0 in range(nsrc):
 
-          i=u[i0] # sorted order bright->faint
-          if (srclist[kflux][i]<1e-8):
+          i=sortidx[i0] # sorted order bright->faint
+          # TODO make this unit-aware
+          if (srclist[kflux][i].value<1e-8):
                continue
           # discard sources with flux below the threshold
           if srclist[kflux][i]<(origfluxcut*srclist[kdflux][i]):
-               newflux[i]=1e-8
+               newflux[i] = 1e-8 * srclist[kflux][i].unit
                fitted[i]=-1
                continue
 
@@ -1613,10 +1690,10 @@ def fit_and_subtract(infile, # input mosaic image
                # subtract the original aperture photom, unbroadened
                # TODO consider subtracting entire psf, not just core of size scor_pix
                resid_nofit[xy0[1]-scor_pix[1]//2:xy0[1]+scor_pix[1]//2,xy0[0]-scor_pix[0]//2:xy0[0]+scor_pix[0]//2]-= \
-                    srclist[kflux][i]*tomjy*1e-9/srperpix* \
+                    flux2im( srclist[kflux][i], header ) * \
                     np.roll(psfcore[0],[xy4i[0],xy4i[1]],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
                model_nofit[xy0[1]-scor_pix[1]//2:xy0[1]+scor_pix[1]//2,xy0[0]-scor_pix[0]//2:xy0[0]+scor_pix[0]//2]+= \
-                    srclist[kflux][i]*tomjy*1e-9/srperpix* \
+                    flux2im( srclist[kflux][i], header ) * \
                     np.roll(psfcore[0],[xy4i[0],xy4i[1]],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
 
                # if this source has not yet been fitted
@@ -1624,22 +1701,23 @@ def fit_and_subtract(infile, # input mosaic image
                if fittype and fitted[i]<=0:
                    # find neighboring sources, within "window" (usually set to sfitrgn_pix*pixsize/2 above)
                     cdec=np.cos(srcde[i]*np.pi/180)
+                    # TODO make flux limit unit-aware
                     znear=np.where( (np.absolute(srcra-srcra[i])<1.*window/cdec )*
                                    (np.absolute(srcde-srcde[i])<1.*window )*
-                                   (newflux>1e-6))[0]
+                                   (newflux.value>1e-6))[0]
        
                     # if newflux (which is still the input flux) of the main source is bright enough, 
                     # and there are some neighbours, they may be part of the airy ring and should be removed
-                    if newflux[i]>0.15 and len(znear)>1:    # TODO make this condition specific to F1000W only
+                    if newflux.value[i]>0.15 and len(znear)>1:    # TODO make this condition specific to F1000W only
                          d2=(srcra[znear]-srcra[i])**2*cdec**2 + (srcde[znear]-srcde[i])**2
                          zring=znear[np.where((d2>(1.1/3600)**2)*(d2<(1.5/3600)**2))[0]] # TODO THIS IS FOR F1000W ONLY
                          if len(zring)>0:
                               fitted[zring]=100
-                              newflux[zring]=1e-8
+                              newflux.value[zring]=1e-8
                               # TODO plot these with different symbol?
                          znear=np.where( (np.absolute(srcra-srcra[i])<1.*window/cdec )*
                                        (np.absolute(srcde-srcde[i])<1.*window )*
-                                       (newflux>1e-8))[0]
+                                       (newflux.value>1e-8))[0]
        
                     if len(znear)>1: # sort neighbour sources by distance from the primary source
                          d2=(srcra[znear]-srcra[i])**2*cdec**2 + (srcde[znear]-srcde[i])**2
@@ -1667,13 +1745,14 @@ def fit_and_subtract(infile, # input mosaic image
        
                          # NOTE: sfitrgn_pix must be even #pix (20250210 TODO check if still true)
                          # finally, we actually extract the "clip" fitting region:
+                         # assume that all unit issues have been resolved upstream, and go unitless here
                          imclip=resid[xy0[1]-sfitrgn_pix[1]//2:xy0[1]+sfitrgn_pix[1]//2,
-                                      xy0[0]-sfitrgn_pix[0]//2:xy0[0]+sfitrgn_pix[0]//2]
+                                      xy0[0]-sfitrgn_pix[0]//2:xy0[0]+sfitrgn_pix[0]//2].copy().value
 
-                         # the fitting will deal with the source peak flux in MJy/sr, 
+                         # the fitting will deal with the source peak flux in image units (e.g. MJy/sr), 
                          # because its easier to scale the model PSF that way, and later we can 
                          # convert that back to mJy  
-                         thisfluxMJy=newflux[i]*tomjy*1e-9/srperpix # mJy -> Mjy/sr assuming normalized psf
+                         thisfluxMJy=flux2im(newflux[i], header).value # mJy -> Mjy/sr assuming normalized psf
          
                          params = Parameters()
                          params.add('bg', value=np.mean(imclip), min=0)
@@ -1706,7 +1785,7 @@ def fit_and_subtract(infile, # input mosaic image
                               off=xy_near-xy0
 
                               # f1 f2 etc are the (peak) fluxes of the neighboring sources in MJy/sr
-                              thisfluxMJy=newflux[znear_ord[ii]]*tomjy*1e-9/srperpix # original or fitted flux
+                              thisfluxMJy=flux2im(newflux[znear_ord[ii]], header).value # original or fitted flux
                               params.add('f%i'%ii, value=thisfluxMJy,min=0,max=thisfluxMJy*maxfluxfactor)
          
                               # don't re-fit previously fitted sources, nor ones outside the rfit fitting radius
@@ -1748,11 +1827,11 @@ def fit_and_subtract(infile, # input mosaic image
 
                          if out.success:
                               # TODO this may be ~10% high because we fit the PSF core vs full PSF
-                              newflux[i] = out.params['f0'].value/tomjy *srperpix/1e-9
+                              newflux[i] = im2flux( out.params['f0'] * subim.unit, header )
                               fitted[i]=len(np.where(d2<rfit**2)[0]) # number of sources fitted TODO this doesn't take into account if some near sources have not be re-fit because they were previously fit
                               jout[i]=out.params['j0']
                               xyout[i]=np.array([out.params['x0'].value,out.params['y0'].value])+xy0
-                              bgfit[i]=out.params['bg']
+                              bgfit[i]=out.params['bg'] * subim.unit
           
                               # plot the point in black if it has been fitted
                               if debug:
@@ -1765,7 +1844,7 @@ def fit_and_subtract(infile, # input mosaic image
                                    if out.params['f%i'%ii].vary==True:
                                         fitted[znear_ord[ii]]=fitted[i]
                                         jout[znear_ord[ii]]=out.params['j%i'%ii]
-                                        bgfit[znear_ord[ii]]=out.params['bg']
+                                        bgfit[znear_ord[ii]]=out.params['bg'] * subim.unit
                                         # plot the neighbor as magenta if it has been fitted
                                         if debug:
                                              plt.plot(xynear[0]+ct*rpix,xynear[1]+st*rpix,'m',alpha=alpha,linewidth=2)
@@ -1778,11 +1857,11 @@ def fit_and_subtract(infile, # input mosaic image
                                         xy0near=np.int32(np.round(xynear))                                        
                                         xy4i=np.int32(np.round((xynear-xy0near)*4))
                                         resid_nofit[xy0near[1]-scor_pix[1]//2:xy0near[1]+scor_pix[1]//2,xy0near[0]-scor_pix[0]//2:xy0near[0]+scor_pix[0]//2]-= \
-                                             srclist[kflux].data[znear_ord[ii]]*tomjy*1e-9/srperpix* \
+                                             flux2im( srclist[kflux][znear_ord[ii]], header ) * \
                                              np.roll(psfcore[0],[xy4i[0],xy4i[1]],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
                                         
                                         model_nofit[xy0near[1]-scor_pix[1]//2:xy0near[1]+scor_pix[1]//2,xy0near[0]-scor_pix[0]//2:xy0near[0]+scor_pix[0]//2]+= \
-                                             srclist[kflux].data[znear_ord[ii]]*tomjy*1e-9/srperpix* \
+                                             flux2im( srclist[kflux][znear_ord[ii]], header ) * \
                                              np.roll(psfcore[0],[xy4i[0],xy4i[1]],axis=[1,0]).reshape(scor_pix[0],4,scor_pix[1],4).sum(3).sum(1)
           
                                       
@@ -1803,10 +1882,10 @@ def fit_and_subtract(infile, # input mosaic image
        
                     # calling residual(return_type=substars) will only remove the fitted sources and 
                     # not remove a flat bg i.e. its designed for creating the residual image
-                    thisresid=residual(params,imclip,"substars",psfcore,scor_pix,sfitrgn_pix,njparams)
+                    thisresid = residual(params,imclip,"substars",psfcore,scor_pix,sfitrgn_pix,njparams) * subim.unit
                     # note, failed fits still get subtracted from the fitted resid
                     # TODO subtract entire psf, not just core, here (would need the residual function to do all that functionality now, so probably not worth it
-                    thismodel=residual(params,imclip,"stars",psfcore,scor_pix,sfitrgn_pix,njparams)
+                    thismodel = residual(params,imclip,"stars",psfcore,scor_pix,sfitrgn_pix,njparams) * subim.unit
        
                     resid[xy0[1]-sfitrgn_pix[1]//2:xy0[1]+sfitrgn_pix[1]//2,
                          xy0[0]-sfitrgn_pix[0]//2:xy0[0]+sfitrgn_pix[0]//2] = thisresid
@@ -1843,7 +1922,7 @@ def fit_and_subtract(infile, # input mosaic image
      # =============== display the original/apphot residual image
      if doplot:
           plt.subplot(2,2,2)
-          plt.imshow(resid_nofit,norm=norm,cmap=cmap4ims,origin="lower")
+          plt.imshow(resid_nofit.value,norm=norm,cmap=cmap4ims,origin="lower")
           if doregion:
               s=subim.shape
               plt.xlim(plotborder*sfitrgn_pix[0],s[1]-plotborder*sfitrgn_pix[0])
@@ -1872,7 +1951,7 @@ def fit_and_subtract(infile, # input mosaic image
                # ========================================
                # now show the residual after psf-fitting 
                plt.subplot(2,2,3)
-               plt.imshow(resid, origin='lower', cmap=cmap4ims, norm=norm)
+               plt.imshow(resid.value, origin='lower', cmap=cmap4ims, norm=norm)
                if debug:
                     plt.xlabel("k:fit r:v.fnt m:~fnt c:~brt, y:fail")
                plt.title("fit residual: "+fittype)
@@ -1904,33 +1983,33 @@ def fit_and_subtract(infile, # input mosaic image
                inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=resid
                inhdu.writeto(infile[:-5]+"_resid_region_"+fittype+".fits",overwrite=True)
           else:
-               inhdu.data=resid
+               inhdu.data=resid.value
                inhdu.writeto(infile[:-5]+"_resid_"+fittype+".fits",overwrite=True)
 
           # save the model image after fitting
           if doregion:
-               inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=model
+               inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=model.value
                inhdu.writeto(infile[:-5]+"_model_region_"+fittype+".fits",overwrite=True)
           else:
-               inhdu.data=model
+               inhdu.data=model.value
                inhdu.writeto(infile[:-5]+"_model_"+fittype+".fits",overwrite=True)
 
 
      # save the residual image without fitting
      resid_suffix = f"_resid_apphot_r{radius:4.2f}" if radius is not None else "_resid_apphot"
      if doregion:
-          inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=resid_nofit
+          inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=resid_nofit.value
           inhdu.writeto(infile[:-5]+resid_suffix+"_region.fits",overwrite=True)
      else:
-          inhdu.data=resid_nofit
+          inhdu.data=resid_nofit.value
           inhdu.writeto(infile[:-5]+resid_suffix+".fits",overwrite=True)
      # save the model image without fitting
      model_suffix = f"_model_apphot_r{radius:4.2f}" if radius is not None else "_model_apphot"
      if doregion:
-          inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=model_nofit
+          inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=model_nofit.value
           inhdu.writeto(infile[:-5]+model_suffix+"_region.fits",overwrite=True)
      else:
-          inhdu.data=model_nofit
+          inhdu.data=model_nofit.value
           inhdu.writeto(infile[:-5]+model_suffix+".fits",overwrite=True)
 
 
@@ -1938,14 +2017,15 @@ def fit_and_subtract(infile, # input mosaic image
           srclist['ra'] = srcra
           srclist['dec'] = srcde
           srclist.add_columns([newflux,jout,fitted],names=[kflux+"_refit_"+fittype,('jout_%4.1f_'%wave)+fittype,('nfitted_%4.1f_'%wave)+fittype])
-          srclist.write(froot+"_refit.csv",overwrite=True)
+          srclist.write(froot+"_refit.ecsv",overwrite=True)
      
      
      if doplot:
           # standard overplotting (non-debug)
           for i in range(nsrc):
+               # TODO make flux limits unit-aware
                xy=inwcs.wcs_world2pix([[srcra[i],srcde[i]]],0)[0]-np.array([subim_xy[1][0],subim_xy[0][1]])
-               if newflux[i]>1e-8 and xy.min()>0 and xy[1]<subim.shape[0] and xy[0]<subim.shape[1] and srclist[kflux][i]>1e-6:
+               if newflux[i].value>1e-8 and xy.min()>0 and xy[1]<subim.shape[0] and xy[0]<subim.shape[1] and srclist[kflux][i].value>1e-6:
                    if fitted[i]>0:
                        if srclist[kflux][i]<=0:
                            col='r'
@@ -1967,7 +2047,7 @@ def fit_and_subtract(infile, # input mosaic image
                                alpha=0.5
            
                        plt.subplot(2,2,4)
-                       plt.plot(srclist[kflux][i],newflux[i],'.',color=col)
+                       plt.plot(srclist[kflux][i].value,newflux[i].value,'.',color=col)
            
                        if not debug:
                            for jj in [1,2,3]:
@@ -2009,7 +2089,7 @@ def fit_and_subtract(infile, # input mosaic image
 def get_image3_catalog(filedir, filter, galaxy, level='lv3'):
     cat_dir = filedir
     # cat_dir = dir + f"{galaxy}/{filter.upper()}/{level}"
-    cat_filename = f"{galaxy}_nircam_{level}_{filter.lower()}_cat_align.ecsv"
+    cat_filename = f"{galaxy}_nircam_{level}_{filter.lower()}_cat_align.csv"
     cat_name = cat_dir + "/" + cat_filename
     return cat_name
 
@@ -2017,7 +2097,7 @@ def get_image3_catalog(filedir, filter, galaxy, level='lv3'):
 # Cross match the catalog that we have made with the outputs of the image3pipeline
 def cross_match_catalogs(dir, filter, galaxy, phot_full, cat_image3):
     cat_name = get_image3_catalog(dir, filter, galaxy=galaxy)
-    calib_cat = Table.read(cat_name, format='ascii.ecsv')
+    calib_cat = QTable.read(cat_name, format='ascii.ecsv')
 
     # Use proximity based approach to cross match the catalogs
     calib_coords = SkyCoord(ra=calib_cat['ra'] * u.deg, dec=calib_cat['dec'] * u.deg)
@@ -2151,7 +2231,7 @@ def do_photometry(
                if "find_cat_filename" in conf['parameters']['source_find']:
                     cat_filename = conf['parameters']['source_find']['find_cat_filename']
                else:
-                    cat_filename = f"{gal}_jwst_{band}_find_cat." + cat_filetype
+                    cat_filename = f"{gal}_{band}_find_cat." + cat_filetype
 
                if 'source_find' in steps:
                     # Get sources using the source finder
@@ -2170,7 +2250,7 @@ def do_photometry(
                     print()
                     print(f"Importing sources from existing catalog for {gal} at {band}...")
                     # Load the existing source catalog
-                    sources = Table.read(cat_path + cat_filename)
+                    sources = QTable.read(cat_path + cat_filename)
                     print(f"Loaded {len(sources)} sources from {cat_path + cat_filename}")
 
                     # Check if any of the filename contains the word 'dolphot'
@@ -2203,6 +2283,7 @@ def do_photometry(
                     x_to_search_for = ['xcentroid', 'x_center', 'x_centroid', 'xcenter']
                     y_to_search_for = ['ycentroid', 'y_center', 'y_centroid', 'ycenter']
                     # Cycle through
+                    # TODO this looks like x_to_search_for was not fully wired into the ifelse here:
                     for col in required_cols:
                          if col not in sources.colnames:
                               # Check whether there is a xcenter and ycenter column instead of x_centroid and y_centroid, and if so, rename them
@@ -2259,7 +2340,7 @@ def do_photometry(
                if "phot_cat_filename" in conf['parameters']['photometry']:
                     cat_filename = conf['parameters']['photometry']['phot_cat_filename']
                else:
-                    cat_filename = f"{gal}_jwst_{band}_phot_cat_r{r_opt:4.2f}." + cat_filetype
+                    cat_filename = f"{gal}_{band}_phot_cat_r{r_opt:4.2f}." + cat_filetype
 
                # Perform photometry with circular apertures
                if 'aperture_photometry' in steps:
@@ -2290,7 +2371,7 @@ def do_photometry(
                else:
                     phot_cat_path = os.path.join(local['out_dir'], cat_filename)
                     if os.path.exists(phot_cat_path):
-                         catalogs[gal][band] = Table.read(phot_cat_path)
+                         catalogs[gal][band] = QTable.read(phot_cat_path)
                          print(f"Loaded photometry catalog from {phot_cat_path}")
                     else:
                          print(f"Warning: aperture_photometry not requested and photometry catalog not found at {phot_cat_path}.")
@@ -2313,8 +2394,8 @@ def do_photometry(
                          pixbinfactor=1.,
                          fittype=fittype, # "amp" or "amppos" or "ampwid" but here we want None to just create residual
                          doplot=True,
-                         kflux='aperture_flux_mJy', # key name for app flux in input catalog
-                         kdflux='tot_err_mJy',  # key name for app flux error in input catalog
+                         kflux='aperture_flux', # key name for app flux in input catalog
+                         kdflux='total_err',  # key name for app flux error in input catalog
                          kra='ra', # key name for RA in input catalog
                          kde='dec', # key name for Dec in input catalog
                          doregion=conf['parameters']['residual']['doregion'],

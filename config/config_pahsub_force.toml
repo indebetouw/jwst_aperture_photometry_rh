@@ -12,7 +12,7 @@ version = ''
 ptype = [""]
 projects = [""]
 inst = ["NIRCam"]
-cat_filetype = "csv"
+cat_filetype = "ecsv"
 
 [parameters.r_opt]
 
