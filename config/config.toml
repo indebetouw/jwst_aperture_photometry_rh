@@ -59,3 +59,9 @@ write = true
 overwrite = true
 cat_filetype = "fits"    # csv, fits, or other type that astropy table recognizes
 local_bkg_subtract = true
+
+[parameters.residual]
+
+doregion = false
+region_center = [0.0, 0.0]
+region_size = 0.01
