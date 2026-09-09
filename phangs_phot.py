@@ -42,7 +42,7 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config_pahsub.toml'     # Photometry parameters
+config_file = 'config/config_pahsub_force.toml'     # Photometry parameters
 local_file = 'config/local.toml'       # Paths to directories
 # TODO make flux limits unit-aware
 lowfluxlim = 1e-5 # below this its a nondetection
@@ -212,7 +212,7 @@ def get_pixarea_in_sr(header):
 
 def open_jwst(filename, get_coverage=True):
      """
-     Open JWST data (from either MIRI/NIRCam) and return image, error, header.
+     Open data and return image, error, header.
      Using the stage 3 aligned data products, and it defaults to the anchored mosaic (which is the most aligned product).
 
      Args:
@@ -237,6 +237,9 @@ def open_jwst(filename, get_coverage=True):
                     img_file = hdul[ext]
                     header = img_file.header
                     img = img_file.data * u.Unit(header['BUNIT'])
+                    # special case nonstandard HST Ha:
+                    if "10^-20" in header.comments['BUNIT']:
+                        img = img * 1e-20
                     break
           # Error
           hdunames = [hdu.name for hdu in hdul]
@@ -1544,6 +1547,7 @@ def fit_and_subtract(infile, # input mosaic image
      wout=np.zeros(nsrc)
      # and fitted xy position
      xyout=np.zeros([nsrc,2])
+     rdout=np.zeros([nsrc,2])
      # distance to the nearest source
      nearest=np.zeros(nsrc)
 
@@ -1838,12 +1842,14 @@ def fit_and_subtract(infile, # input mosaic image
                               wout[i] =np.interp(out.params['j0'].value, range(len(widths)), widths)
                               xyout[i]=np.array([out.params['x0'].value,out.params['y0'].value])+xy0
                               bgfit[i]=out.params['bg'] * subim.unit
+                              rdout[i]=inwcs.wcs_pix2world([xyout[i]],0)[0]
           
                               # set nearby *fitted* values and jout, xyout,
                               # so they don't get fit again later
                               for ii in np.arange(1,len(znear_ord)):
                                    xynear=np.array([out.params['x%i'%ii].value,out.params['y%i'%ii].value])+xy0
                                    xyout[znear_ord[ii]]=xynear
+                                   rdout[znear_ord[ii]]=inwcs.wcs_pix2world([xynear],0)[0]
                                    if out.params['f%i'%ii].vary==True:
                                         fitted[znear_ord[ii]]=fitted[i]
                                         jout[znear_ord[ii]]=out.params['j%i'%ii]
@@ -1913,7 +1919,7 @@ def fit_and_subtract(infile, # input mosaic image
                fitted[i]=-2
                         
           # write all sources to ds9 
-          ds9reg.write("point(%f,%f) # point=circle color=green\n"%(srcra[i],srcde[i]))
+          ds9reg.write("point(%f,%f) # point=circle color=green\n"%(rdout[i][0],rdout[i][1]))
              
      ds9reg.close()
      
@@ -1980,15 +1986,17 @@ def fit_and_subtract(infile, # input mosaic image
 
 
      if fittype is not None:
-          srclist['ra'] = srcra
-          srclist['dec'] = srcde
+          srclist['ra_orig'] = srcra
+          srclist['dec_orig'] = srcde
+          srclist['ra'] = rdout[:,0]
+          srclist['dec'] = rdout[:,1]
           srclist.add_columns([newflux,jout,wout,fitted,bgfit],
                               names=[kflux+"_refit_"+fittype,
                                      ('jout_'+fittype),
                                      ('wout_'+fittype),
                                      ('nfitted_'+fittype),
                                      ('bgfit_'+fittype)])
-          srclist.write(froot+"_refit.ecsv",overwrite=True)
+          srclist.write(froot+"_"+fittype+".ecsv",overwrite=True)
      
      
      if doplot:
@@ -2054,7 +2062,7 @@ def fit_and_subtract(infile, # input mosaic image
           plt.xlabel("aperture photometry")
           plt.ylabel("psf-fitted photometry")
      
-          plt.savefig(froot+"_fit_residuals.png")
+          plt.savefig(froot+"_"+fittype+"_residuals.png")
           plt.close()
 
 
