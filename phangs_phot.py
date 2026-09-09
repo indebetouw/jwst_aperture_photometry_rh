@@ -130,6 +130,7 @@ def get_file(wdir, version, project, galaxy, ptype, filter):
                          filter.lower() in f.lower() and \
                          "resid" not in f.lower() and \
                          "background" not in f.lower() and \
+                         "bgsub" not in f.lower() and \
                          "model" not in f.lower() and \
                          ("pah" in filter.lower()) == ("pah" in f.lower()):
                          plausible_files.append(os.path.join(root, f))
@@ -553,13 +554,17 @@ def run_source_finder(img,
           )
           # For sources where the centroid could not be determined,
           # use the position of the peak instead.
-          # RI TODO: this does end up keeping sources on the edges which we don't want, but it does save a blobby source
+          # RI this does end up keeping sources on the edges which we don't want, but it does save a blobby source
+          # even worse ,it includes a LOT of chaff, so only keep the super-bright ones
+          # TIDI make the cut unit-aware
           #----------------------------------------
-          z=np.where(np.isnan(sources['x_centroid']))[0]
+          z=np.where((np.isnan(sources['x_centroid']))*(sources['peak_value'].value>5))[0]
           if len(z)>0:
-               print(f"Warning: discarding {len(z)} sources with NaN centroids")
                sources['x_centroid'][z]=sources['x_peak'][z]        
                sources['y_centroid'][z]=sources['y_peak'][z]
+          z=np.where((np.isnan(sources['x_centroid']))*(sources['peak_value'].value<5))[0]
+          if len(z)>0:
+               print(f"Warning: discarding {len(z)} sources with NaN centroids")
           z=np.where(np.isfinite(sources['x_centroid']))[0]
           sources = sources[z]
 
@@ -2364,7 +2369,9 @@ def do_photometry(
                     r_opt_asec = r_opt * header['CDELT2'] * 3600.  # convert pixels to arcseconds
                     for src in catalog:
                          # TODO make this unit-aware
-                         if src['aperture_flux'].value > lowfluxlim:
+                         # if src['aperture_flux'].value > lowfluxlim:
+                         if (src['aperture_flux'].value > lowfluxlim)* \
+                              ((src['aperture_flux']/src['total_err'])>1):
                               ds9reg.write(f'circle({src['ra']},{src['dec']},{r_opt_asec}") # color=blue\n')
                          else:
                               ds9reg.write(f'circle({src['ra']},{src['dec']},{r_opt_asec/3}") # color=yellow\n')

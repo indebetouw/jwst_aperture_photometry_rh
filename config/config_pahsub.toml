@@ -1,8 +1,8 @@
 # Directories will be set in a locals file, not the config
 # note: we don't have a way to save the bkgsub image yet so it has to be recreated if you do find or aperture_photometry
 
-# steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr", "residual", "psffit"]
-steps = ["subtract_bkg", "source_find", "aperture_photometry"] 
+steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr", "residual", "psffit"]
+# steps = ["subtract_bkg", "source_find", "aperture_photometry"] 
 targets = ["ngc3351"]
 product = ""
 bands = ["convolved_pah_f360m"]
@@ -32,16 +32,16 @@ plot = true
 sigma = 3.0
 coverage_mask = false
 # background parameters can be specified in _pix or in _pc;  if both are present, _pix takes precedence
-box_size_pc = 100
-filter_size_pc = 15
+# box_size_pc = 100
+# filter_size_pc = 15
 # ngc3351(10Mpc) 15pc is too small;  at 20Mpc 30pc is less than the psf, so maybe doing this in pix is better
-# box_size_pix = 50
-# filter_size_pix = 6
+box_size_pix = 100
+filter_size_pix = 10
 bkg_estimator = 'SExtractorBackground()'
 sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
 # only set this if you want to override the sample table
-dist_Mpc =5.2     
+# dist_Mpc =5.2     
 plot = false
 
 [parameters.source_find]
