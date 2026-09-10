@@ -238,8 +238,6 @@ def open_jwst(filename, get_coverage=True):
                     header = img_file.header
                     img = img_file.data * u.Unit(header['BUNIT'])
                     # special case nonstandard HST Ha:
-                    if "10^-20" in header.comments['BUNIT']:
-                        img = img * 1e-20
                     break
           # Error
           hdunames = [hdu.name for hdu in hdul]
@@ -323,12 +321,6 @@ def match(
 # ------------------------------------------------
 # TODO: need to include valid mask based on weight image or other metric
 
-def _background_filename_for(image_path):
-     """Return the standard cached background filename for an image."""
-     base, _ = os.path.splitext(image_path)
-     return f"{base}_background.fits"
-
-
 def calculate_bkg(img,
           gal,
           band,
@@ -382,7 +374,7 @@ def calculate_bkg(img,
 
      # print(f"bkg array {bkg.background}")
      if image_path is not None:
-          background_path = _background_filename_for(image_path)
+          background_path = out_dir + "/" + os.path.basename(image_path).replace(".fits", "_background.fits")
           out_header = header.copy() if header is not None else fits.Header()
           hdu = fits.PrimaryHDU(data=np.asarray(bkg.background, dtype=float), header=out_header)
           hdu.writeto(background_path, overwrite=True)
@@ -391,12 +383,11 @@ def calculate_bkg(img,
      # threshold_img = snr_threshold * bkg.background_rms
      img_sub = img - bkg.background
 
-     base, _ = os.path.splitext(image_path)
-     bgsubfile = f"{base}_bgsub.fits"
+     bgsub_path = out_dir + "/" + os.path.basename(image_path).replace(".fits", "_bgsub.fits")
      out_header = header.copy() if header is not None else fits.Header()
      hdu = fits.PrimaryHDU(data=np.asarray(img_sub, dtype=float), header=out_header)
-     hdu.writeto(bgsubfile, overwrite=True)
-     print(f"Saved background-subtracted image to {bgsubfile}")
+     hdu.writeto(bgsub_path, overwrite=True)
+     print(f"Saved background-subtracted image to {bgsub_path}")
 
      if doplot:
           # Plot the image, background, and background-subtracted image
@@ -438,8 +429,8 @@ def subtract_bkg(image_path,
           maxiters_for_bkg_clip=5,
           **kwargs):
      """Create a cached background FITS file if needed and subtract it from the image."""
-     background_path = _background_filename_for(image_path)
-
+     background_path = out_dir + "/" + os.path.basename(image_path).replace(".fits", "_background.fits")
+     
      if not os.path.exists(background_path):
           print(f"Background file not found for {image_path}. Calculating background...")
           img, err, snr_map, coverage_mask, header = open_jwst(image_path)
@@ -912,6 +903,7 @@ def compute_photometry(data,
           )
           wcs = WCS(header)
      ra, dec = wcs.all_pix2world(phot_full["xcenter"], phot_full["ycenter"], 0)
+     pixscale = wcs.proj_plane_pixel_scales()[0].to("arcsec")
      phot_full["ra"] = ra
      phot_full["dec"] = dec
 
@@ -948,7 +940,7 @@ def compute_photometry(data,
      phot_full['bkg_err'] = im2flux( bkg_stats.std * aper_stats.sum_aper_area.value, header )
      phot_full['poisson_err'] = im2flux( phot_full['aperture_sum_err'], header )
  
-     # TODO: Is there a better way to do this than a list?
+     # TODO: Is there a better way to do this than a list?  add to the filter table!
      if band.lower()=='f335m' or band.lower()=='f770w' or band.lower()=='f1000w' or band.lower()=='f1130w' or band.lower()=='f2100w' or "pah" in band.lower():
           phot_full['total_err'] = np.sqrt(phot_full['poisson_err']**2 + phot_full['bkg_err']**2 )
      elif band.lower()=='f200w' or band.lower()=='f300m' or band.lower()=='f360m' or band.lower()=='f444w':
@@ -1020,12 +1012,16 @@ def compute_photometry(data,
           plt.close(fig)
 
 
-
+          # TODO put in config file
+          min_halfcut_asec = 0.7 * u.arcsec
+          # Convert minimum half-cutout size from arcsec to pixels
+          min_halfcut_pix = (min_halfcut_asec / pixscale).decompose().value
+     
           # Make the 6x6 plot of source cutouts using sources from the aperture corrected catalog
           # nonan=np.where(np.isfinite(phot_full['aperture_flux_mJy']))[0]
           # brightest_sources_apcorr = phot_full[nonan][np.argsort(phot_full['aperture_flux_mJy'][nonan])[::-1]][:36]
           # instead of re-sorting, leave these in the order from the finder which sorted them from brightest
-          # peak to lower peak values
+          # peak to lower peak values - this allows forced photometry to have the same 36 sources in each band
           brightest_sources_apcorr = phot_full[:36]
           # brightest_sources_apcorr = phot_full[nonan][:36]
           fig, axes = plt.subplots(6, 6, figsize=(10, 10), 
@@ -1033,7 +1029,7 @@ def compute_photometry(data,
                                                 'wspace': 0.01, 'hspace': 0.01})
           for i, (ax, row) in enumerate(zip(axes.flatten(), brightest_sources_apcorr)):
                x, y = row['xcenter'], row['ycenter']
-               cutout_size = np.maximum(radius*4, radius_sky_out*1.1) # actually, half-cutout size
+               cutout_size = np.max([radius*4, radius_sky_out*1.1, min_halfcut_pix]) # actually, half-cutout size
                x_min, x_max = int(x - cutout_size), int(x + cutout_size)
                y_min, y_max = int(y - cutout_size), int(y + cutout_size)
                cutout = data[y_min:y_max, x_min:x_max]
@@ -1061,9 +1057,10 @@ def compute_photometry(data,
                if row['aperture_flux'].unit == u.mJy:
                     ax.text(0.5, 0.9, f"{row['aperture_flux'].value*1000:.1f}uJy ({row['bkg_flux'].value*1000:.2f})", color='white', fontsize=8, ha='center', va='center', transform=ax.transAxes)               
                else:
-                    ax.text(0.5, 0.9, f"{row['aperture_flux']:.1f} ({row['bkg_flux'].value:.2f})", color='white', fontsize=8, ha='center', va='center', transform=ax.transAxes)
+                    ax.text(0.5, 0.9, f"{row['aperture_flux']:.1f}", color='white', fontsize=8, ha='center', va='center', transform=ax.transAxes)
                #ax.text(0.08, 0.93, f"{i+1}", color='cyan', fontsize=8, ha='center', va='center', transform=ax.transAxes)
-               ax.text(0.08, 0.05, f"{x:.0f},{y:.0f}", color='cyan', fontsize=8, ha='left', va='center', transform=ax.transAxes)
+               #ax.text(0.08, 0.05, f"{x:.0f},{y:.0f}", color='cyan', fontsize=8, ha='left', va='center', transform=ax.transAxes)
+               ax.text(0.08, 0.05, f"{row['ra']:.4f},{row['dec']:.4f}", color='cyan', fontsize=6, ha='left', va='center', transform=ax.transAxes)
                # Select all sources in the catalog that are within the cutout region
                sources_in_cutout = phot_full[(phot_full['xcenter'] > x_min) & (phot_full['xcenter'] < x_max) & (phot_full['ycenter'] > y_min) & (phot_full['ycenter'] < y_max)]
                ax.scatter(sources_in_cutout['xcenter'], sources_in_cutout['ycenter'], s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
@@ -1656,8 +1653,9 @@ def fit_and_subtract(infile, # input mosaic image
 
                
      # open a ds9 output file
-     ds9reg=open('.'.join(srcfile.split('.')[:-1])+"_"+fittype+".reg","w")
-     ds9reg.write("fk5\n")
+     if fittype:
+          ds9reg=open('.'.join(srcfile.split('.')[:-1])+"_"+fittype+".reg","w")
+          ds9reg.write("fk5\n")
 
      th=np.arange(21)/10*np.pi
      st=np.sin(th)
@@ -1919,9 +1917,11 @@ def fit_and_subtract(infile, # input mosaic image
                fitted[i]=-2
                         
           # write all sources to ds9 
-          ds9reg.write("point(%f,%f) # point=circle color=green\n"%(rdout[i][0],rdout[i][1]))
+          if fittype: 
+               ds9reg.write("point(%f,%f) # point=circle color=green\n"%(rdout[i][0],rdout[i][1]))
              
-     ds9reg.close()
+     if fittype:
+          ds9reg.close()
      
      
      
@@ -1953,36 +1953,36 @@ def fit_and_subtract(infile, # input mosaic image
                plt.xlim(plotborder*sfitrgn_pix[0],s[1]-plotborder*sfitrgn_pix[0])
                plt.ylim(plotborder*sfitrgn_pix[1],s[0]-plotborder*sfitrgn_pix[1])
                inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=resid
-               inhdu.writeto(infile[:-5]+"_resid_region_"+fittype+".fits",overwrite=True)
+               inhdu.writeto(froot+"_resid_region_"+fittype+".fits",overwrite=True)
           else:
                inhdu.data=resid.value
-               inhdu.writeto(infile[:-5]+"_resid_"+fittype+".fits",overwrite=True)
+               inhdu.writeto(froot+"_resid_"+fittype+".fits",overwrite=True)
 
           # save the model image after fitting
           if doregion:
                inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=model.value
-               inhdu.writeto(infile[:-5]+"_model_region_"+fittype+".fits",overwrite=True)
+               inhdu.writeto(froot+"_model_region_"+fittype+".fits",overwrite=True)
           else:
                inhdu.data=model.value
-               inhdu.writeto(infile[:-5]+"_model_"+fittype+".fits",overwrite=True)
+               inhdu.writeto(froot+"_model_"+fittype+".fits",overwrite=True)
 
 
      # save the residual image without fitting
      resid_suffix = f"_resid_apphot_r{radius:4.2f}" if radius is not None else "_resid_apphot"
      if doregion:
           inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=resid_nofit.value
-          inhdu.writeto(infile[:-5]+resid_suffix+"_region.fits",overwrite=True)
+          inhdu.writeto(froot+resid_suffix+"_region.fits",overwrite=True)
      else:
           inhdu.data=resid_nofit.value
-          inhdu.writeto(infile[:-5]+resid_suffix+".fits",overwrite=True)
+          inhdu.writeto(froot+resid_suffix+".fits",overwrite=True)
      # save the model image without fitting
      model_suffix = f"_model_apphot_r{radius:4.2f}" if radius is not None else "_model_apphot"
      if doregion:
           inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=model_nofit.value
-          inhdu.writeto(infile[:-5]+model_suffix+"_region.fits",overwrite=True)
+          inhdu.writeto(froot+model_suffix+"_region.fits",overwrite=True)
      else:
           inhdu.data=model_nofit.value
-          inhdu.writeto(infile[:-5]+model_suffix+".fits",overwrite=True)
+          inhdu.writeto(froot+model_suffix+".fits",overwrite=True)
 
 
      if fittype is not None:
@@ -1997,6 +1997,9 @@ def fit_and_subtract(infile, # input mosaic image
                                      ('nfitted_'+fittype),
                                      ('bgfit_'+fittype)])
           srclist.write(froot+"_"+fittype+".ecsv",overwrite=True)
+          panels=[1,2,3]
+     else:
+          panels=[1,2]
      
      
      if doplot:
@@ -2017,12 +2020,13 @@ def fit_and_subtract(infile, # input mosaic image
                          ms=5
                          alpha=1
 
-                    for jj in [1,2,3]:
+                    for jj in panels:
                          plt.subplot(2,2,jj)
                          plt.plot(xy[0],xy[1],psym,color=col,alpha=alpha,markersize=ms,linewidth=1,mfc="none")
 
                else: 
                     wid=1
+                    ms=3
                     if newflux[i].value > lowfluxlim:
                         fratio=newflux[i]/srclist[kflux][i]
                         alpha=1
@@ -2043,26 +2047,28 @@ def fit_and_subtract(infile, # input mosaic image
                         alpha=0.5
                         r=rpix/2
 
-                    plt.subplot(2,2,4)
-                    if newflux[i].value < lowfluxlim:
-                         plt.plot(srclist[kflux][i].value,lowfluxlim,'v',color=col,ms=1+wout[i],mfc="none")
-                    else:
-                         plt.plot(srclist[kflux][i].value,newflux[i].value,'o',color=col,ms=wout[i],mfc="none")
-                    for jj in [1,2,3]:
+                    if fittype:
+                         plt.subplot(2,2,4)
+                         if newflux[i].value < lowfluxlim:
+                              plt.plot(srclist[kflux][i].value,lowfluxlim,'v',color=col,ms=1+wout[i],mfc="none")
+                         else:
+                              plt.plot(srclist[kflux][i].value,newflux[i].value,'o',color=col,ms=wout[i],mfc="none")
+                    for jj in panels:
                          plt.subplot(2,2,jj)
                          plt.plot(xy[0]+ct*r,xy[1]+st*r,color=col,alpha=alpha,markersize=ms,linewidth=wid,mfc="none")
            
                        
      
-     
-          plt.subplot(2,2,4)
-          plt.plot(plt.xlim(),plt.xlim(),'k',alpha=0.2)
-          plt.xscale("log")
-          plt.yscale("log")
-          plt.xlabel("aperture photometry")
-          plt.ylabel("psf-fitted photometry")
-     
-          plt.savefig(froot+"_"+fittype+"_residuals.png")
+          if fittype:
+               plt.subplot(2,2,4)
+               plt.plot(plt.xlim(),plt.xlim(),'k',alpha=0.2)
+               plt.xscale("log")
+               plt.yscale("log")
+               plt.xlabel("aperture photometry")
+               plt.ylabel("psf-fitted photometry")
+               plt.savefig(froot+"_"+fittype+"_residuals.png")
+          else:
+               plt.savefig(froot+"_apphot_residuals.png")
           plt.close()
 
 

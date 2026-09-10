@@ -3,7 +3,7 @@
 
 steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr", "residual", "psffit"]
 # steps = ["subtract_bkg", "source_find", "aperture_photometry"] 
-targets = ["ngc3351"]
+targets = ["ngc1672"]
 product = ""
 bands = ["convolved_pah_f360m"]
 # bands = ["F657"]

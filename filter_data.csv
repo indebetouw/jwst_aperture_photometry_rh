@@ -2,6 +2,7 @@
 # MIRI average wavelengths from https://jwst-docs.stsci.edu/jwst-mid-infrared-instrument/miri-performance/miri-point-spread-functions
 filter_name,empirical_fwhm_pix,central_wave
 F657,2.,0.657
+F658,2.,0.658
 F150W,1.613,1.501
 F164N,1.806,1.644
 F187N,2.065,1.874
