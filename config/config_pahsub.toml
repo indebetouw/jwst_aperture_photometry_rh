@@ -2,17 +2,18 @@
 # note: we don't have a way to save the bkgsub image yet so it has to be recreated if you do find or aperture_photometry
 
 steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr", "residual", "psffit"]
-# steps = ["subtract_bkg", "source_find", "aperture_photometry"] 
-targets = ["ngc1672"]
+# steps = ["residual", "psffit"]
+# steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr"] 
+targets = ["ngc0598"]
 product = ""
 bands = ["convolved_pah_f360m"]
-# bands = ["F657"]
+# bands = ["F187N"]
 version = ''
 ptype = [""]
 projects = [""]
 inst = ["NIRCam"]
 # note, this has to keep units - e.g. ecsv works but not csv
-cat_filetype = "ecsv"
+cat_filetype = "fits"
 
 doregion = false
 # NGC5068 [199.729, -21.040]. # .01

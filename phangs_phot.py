@@ -42,7 +42,7 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config_pahsub_force.toml'     # Photometry parameters
+config_file = 'config/config_pahsub.toml'     # Photometry parameters
 local_file = 'config/local.toml'       # Paths to directories
 # TODO make flux limits unit-aware
 lowfluxlim = 1e-5 # below this its a nondetection
@@ -231,44 +231,47 @@ def open_jwst(filename, get_coverage=True):
      err_file = None
 
      # Open the file and use extensions to assign data and header
-     with fits.open(filename) as hdul:
-          for ext in extensions_to_try:
-               if ext in hdul:
-                    img_file = hdul[ext]
-                    header = img_file.header
-                    img = img_file.data * u.Unit(header['BUNIT'])
-                    # special case nonstandard HST Ha:
-                    break
-          # Error
-          hdunames = [hdu.name for hdu in hdul]
-          if 'ERR' in hdunames:
-               err_file = hdul['ERR']
-               err = err_file.data * u.Unit(header['BUNIT'])
+     hdul=fits.open(filename)
+     #with fits.open(filename) as hdul:
+     for ext in extensions_to_try:
+          if ext in hdul:
+               img_file = hdul[ext]
+               header = img_file.header
+               img = img_file.data * u.Unit(header['BUNIT'])
+               # special case nonstandard HST Ha:
+               break
+     # Error
+     hdunames = [hdu.name for hdu in hdul]
+     if 'ERR' in hdunames:
+          err_file = hdul['ERR']
+          err = err_file.data * u.Unit(header['BUNIT'])
+     else:
+          # estimate error from image - parameters are from Jimena's HST phot, probably need tuning for JWST
+          sigma_clip = SigmaClip(sigma=5., maxiters=10)
+          bkg_estimator = SExtractorBackground()
+          coverage_mask = (~np.isfinite(img)) | (img == 0)
+          bkg = Background2D(
+               img,
+               (30,30),
+               filter_size=(3, 3),
+               fill_value=0.0,
+               sigma_clip=sigma_clip,
+               bkg_estimator=bkg_estimator,
+               coverage_mask=coverage_mask,
+          )
+          # 3rd parameter = Ratio of counts (e.g., electrons or photons) to the data units         
+          # TODO double check gain units, and also make it work for other instruments besides JWST
+          if img.unit.is_equivalent(u.MJy / u.sr):
+               # workaround for numpy bug with units fixed but need python 3.15 I think
+               err = np.asarray(calc_total_error(img.value, bkg.background.value, 
+                                 effective_gain = header['XPOSURE']/header['PHOTMJSR'] )) * img.unit
           else:
-               # estimate error from image - parameters are from Jimena's HST phot, probably need tuning for JWST
-               sigma_clip = SigmaClip(sigma=5., maxiters=10)
-               bkg_estimator = SExtractorBackground()
-               coverage_mask = (~np.isfinite(img)) | (img == 0)
-               bkg = Background2D(
-                    img,
-                    (30,30),
-                    filter_size=(3, 3),
-                    fill_value=0.0,
-                    sigma_clip=sigma_clip,
-                    bkg_estimator=bkg_estimator,
-                    coverage_mask=coverage_mask,
-               )
-               # 3rd parameter = Ratio of counts (e.g., electrons or photons) to the data units         
-               # TODO double check gain units, and also make it work for other instruments besides JWST
-               if img.unit.is_equivalent(u.MJy / u.sr):
-                    # workaround for numpy bug with units fixed but need python 3.15 I think
-                    err = np.asarray(calc_total_error(img.value, bkg.background.value, 
-                                      effective_gain = header['XPOSURE']/header['PHOTMJSR'] )) * img.unit
-               else:
-                    print("WARNING: Image unit is not MJy/sr, using effective gain=1")
-                    err = np.asarray(calc_total_error(img.value, bkg.background.value, 
-                                      effective_gain = 1.0 ) ) * img.unit
-               err_file = "Estimated from image"
+               print("WARNING: Image unit is not MJy/sr, using effective gain=1")
+               err = np.asarray(calc_total_error(img.value, bkg.background.value, 
+                                 effective_gain = 1.0 ) ) * img.unit
+          err_file = "Estimated from image"
+     hdul.close()
+
      # Check the names of the image and error extensions 
      print(f"Image file: {img_file}")
      print(f"Error file: {err_file}")
@@ -550,10 +553,12 @@ def run_source_finder(img,
           # use the position of the peak instead.
           # RI this does end up keeping sources on the edges which we don't want, but it does save a blobby source
           # even worse ,it includes a LOT of chaff, so only keep the super-bright ones
-          # TIDI make the cut unit-aware
+          # TODO make the cut unit-aware
           #----------------------------------------
           z=np.where((np.isnan(sources['x_centroid']))*(sources['peak_value'].value>5))[0]
+          sources['reject'] = ["keep"]*len(sources)
           if len(z)>0:
+               sources['reject'][z] = "centroid_fail"
                sources['x_centroid'][z]=sources['x_peak'][z]        
                sources['y_centroid'][z]=sources['y_peak'][z]
           z=np.where((np.isnan(sources['x_centroid']))*(sources['peak_value'].value<5))[0]
@@ -561,7 +566,6 @@ def run_source_finder(img,
                print(f"Warning: discarding {len(z)} sources with NaN centroids")
           z=np.where(np.isfinite(sources['x_centroid']))[0]
           sources = sources[z]
-
 
           # TODO not sure if the difference betwen x_centroid and xcentroid is used outside of this function
           sources['xcentroid']=sources['x_centroid']        
@@ -893,6 +897,8 @@ def compute_photometry(data,
           phot_full['peak'] = sources['peak'] # keep image units on "peak"
      elif 'peak_value' in sources.colnames: 
           phot_full['peak'] = sources['peak_value']   # TODO change peakfinder output to have peak instead of peak_value
+     if 'reject' in sources.colnames:
+          phot_full['centroid_fail'] = sources['reject']
 
      # Include ra, dec
      with warnings.catch_warnings():
@@ -918,11 +924,10 @@ def compute_photometry(data,
                phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'] * apcorr, header=header)
           elif apcorr.unit.is_equivalent(u.mag):
                phot_full['aperture_sum_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_sum'], header=header) + apcorr.value
-          # add aperture correction to aperture_flux_mJy 
           # TODO do we need to multiply the error by the apcorr? Jimena did not.
           if 'aperture_flux' in phot_full.colnames:
                phot_full['aperture_flux_apcorr'] = phot_full['aperture_flux'] * apcorr if apcorr.unit.is_equivalent(u.dimensionless_unscaled) else phot_full['aperture_flux'] + apcorr.value
-
+               phot_full['aperture_flux_abmag_apcorr'] = convert_aperture_sum_Jy_per_sr_to_abmag(phot_full['aperture_flux_apcorr'], header=header) 
 
      # special step for the continuum subtracted PAH bands to filter some of the poor subtractions:
      if "pah" in band.lower():
@@ -950,11 +955,17 @@ def compute_photometry(data,
           phot_full['total_err'] = np.sqrt(phot_full['poisson_err']**2 + phot_full['bkg_err']**2)
 
 
+     phot_full['total_SNR'] = phot_full['aperture_flux'] / phot_full['total_err']
+     phot_full['poisson_SNR'] = phot_full['aperture_flux'] / phot_full['poisson_err']
+     phot_full['bkg_SNR'] = phot_full['aperture_flux'] / phot_full['bkg_err']
+
      # Write the catalog if requested
      if write:
           if phot_cat_filename is None:
                phot_cat_filename = f"{gal}_{band}_phot_cat_r{radius:4.2f}." + cat_filetype
           print(f"Writing catalog to {out_dir + phot_cat_filename}")
+          # make a plain table to avoid serialized columns, which break TopCat
+          #Table(phot_full).write(out_dir + phot_cat_filename, overwrite=overwrite)
           phot_full.write(out_dir + phot_cat_filename, overwrite=overwrite)
 
      if doplot:
@@ -1482,7 +1493,10 @@ def fit_and_subtract(infile, # input mosaic image
      
      #---------------------------------------------
      # read in input source list and image
-     srclist=QTable.read(srcfile,format="ascii")
+     srclist=QTable.read(srcfile)
+     # in fits format this comes in as a masked array which breaks other things later
+     if np.ma.is_masked(srclist[kflux]):
+          srclist[kflux] = srclist[kflux].filled(0)
      
      # order from brightest to faintest
      # TODO refactor to do this only in the fit loop, to not disorder the actual list
@@ -1545,6 +1559,8 @@ def fit_and_subtract(infile, # input mosaic image
      # and fitted xy position
      xyout=np.zeros([nsrc,2])
      rdout=np.zeros([nsrc,2])
+     rdout[:,0]=srclist['ra']
+     rdout[:,1]=srclist['dec']
      # distance to the nearest source
      nearest=np.zeros(nsrc)
 
@@ -1996,7 +2012,7 @@ def fit_and_subtract(infile, # input mosaic image
                                      ('wout_'+fittype),
                                      ('nfitted_'+fittype),
                                      ('bgfit_'+fittype)])
-          srclist.write(froot+"_"+fittype+".ecsv",overwrite=True)
+          srclist.write(froot+"_"+fittype+"."+cat_filetype,overwrite=True)
           panels=[1,2,3]
      else:
           panels=[1,2]
@@ -2386,9 +2402,12 @@ def do_photometry(
                          # if src['aperture_flux'].value > lowfluxlim:
                          if (src['aperture_flux'].value > lowfluxlim)* \
                               ((src['aperture_flux']/src['total_err'])>1):
-                              ds9reg.write(f'circle({src['ra']},{src['dec']},{r_opt_asec}") # color=blue\n')
+                              if 'reject' in catalog.colnames and catalog['reject'][src.index] != "keep":
+                                   ds9reg.write(f'circle({src['ra']},{src['dec']},{r_opt_asec}") # color=red\n')
+                              else:
+                                   ds9reg.write(f'circle({src['ra']},{src['dec']},{r_opt_asec}") # color=blue\n')
                          else:
-                              ds9reg.write(f'circle({src['ra']},{src['dec']},{r_opt_asec/3}") # color=yellow\n')
+                              ds9reg.write(f'circle({src['ra']},{src['dec']},{r_opt_asec/3}") # color=yellow dash=1 width=1\n')
                     ds9reg.close()
 
 
