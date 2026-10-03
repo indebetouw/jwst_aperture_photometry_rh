@@ -377,7 +377,8 @@ def calculate_bkg(img,
 
      # print(f"bkg array {bkg.background}")
      if image_path is not None:
-          background_path = out_dir + "/" + os.path.basename(image_path).replace(".fits", "_background.fits")
+          # background_path = out_dir + "/" + os.path.basename(image_path).replace(".fits", "_background.fits")
+          background_path = out_dir + f"/{gal}_{band}_background.fits"
           out_header = header.copy() if header is not None else fits.Header()
           hdu = fits.PrimaryHDU(data=np.asarray(bkg.background, dtype=float), header=out_header)
           hdu.writeto(background_path, overwrite=True)
@@ -386,7 +387,7 @@ def calculate_bkg(img,
      # threshold_img = snr_threshold * bkg.background_rms
      img_sub = img - bkg.background
 
-     bgsub_path = out_dir + "/" + os.path.basename(image_path).replace(".fits", "_bgsub.fits")
+     bgsub_path = out_dir + f"/{gal}_{band}_bgsub.fits"
      out_header = header.copy() if header is not None else fits.Header()
      hdu = fits.PrimaryHDU(data=np.asarray(img_sub, dtype=float), header=out_header)
      hdu.writeto(bgsub_path, overwrite=True)
@@ -432,7 +433,7 @@ def subtract_bkg(image_path,
           maxiters_for_bkg_clip=5,
           **kwargs):
      """Create a cached background FITS file if needed and subtract it from the image."""
-     background_path = out_dir + "/" + os.path.basename(image_path).replace(".fits", "_background.fits")
+     background_path = out_dir + f"/{gal}_{band}_background.fits"
      
      if not os.path.exists(background_path):
           print(f"Background file not found for {image_path}. Calculating background...")
@@ -888,17 +889,17 @@ def compute_photometry(data,
      if 'flux' in sources.colnames:  # it won't be there for findpeaks method.  TODO could be added in find step
           phot_full['finder_flux'] = im2flux( sources['flux'], header )
      if 'sharpness' in sources.colnames:
-          phot_full['sharpness'] = np.asarray(sources['sharpness'])
+          phot_full['finder_sharpness'] = np.asarray(sources['sharpness'])
      if 'roundness' in sources.colnames:
-          phot_full['roundness'] = np.asarray(sources['roundness'])          
+          phot_full['finder_roundness'] = np.asarray(sources['roundness'])
      if 'mag' in sources.colnames:
           phot_full['finder_mag'] = np.asarray(sources['mag'])
      if 'peak' in sources.colnames:
-          phot_full['peak'] = sources['peak'] # keep image units on "peak"
+          phot_full['finder_peak'] = sources['peak'] # keep image units on "peak"
      elif 'peak_value' in sources.colnames: 
-          phot_full['peak'] = sources['peak_value']   # TODO change peakfinder output to have peak instead of peak_value
+          phot_full['finder_peak'] = sources['peak_value']   
      if 'reject' in sources.colnames:
-          phot_full['centroid_fail'] = sources['reject']
+          phot_full['finder_centroid_fail'] = sources['reject']
 
      # Include ra, dec
      with warnings.catch_warnings():
@@ -1669,9 +1670,9 @@ def fit_and_subtract(infile, # input mosaic image
 
                
      # open a ds9 output file
-     if fittype:
-          ds9reg=open('.'.join(srcfile.split('.')[:-1])+"_"+fittype+".reg","w")
-          ds9reg.write("fk5\n")
+     #if fittype:
+     #     ds9reg=open('.'.join(srcfile.split('.')[:-1])+"_"+fittype+".reg","w")
+     #     ds9reg.write("fk5\n")
 
      th=np.arange(21)/10*np.pi
      st=np.sin(th)
@@ -1933,11 +1934,11 @@ def fit_and_subtract(infile, # input mosaic image
                fitted[i]=-2
                         
           # write all sources to ds9 
-          if fittype: 
-               ds9reg.write("point(%f,%f) # point=circle color=green\n"%(rdout[i][0],rdout[i][1]))
+          #if fittype: 
+          #     ds9reg.write("point(%f,%f) # point=circle color=green\n"%(rdout[i][0],rdout[i][1]))
              
-     if fittype:
-          ds9reg.close()
+     #if fittype:
+     #     ds9reg.close()
      
      
      
@@ -2002,17 +2003,15 @@ def fit_and_subtract(infile, # input mosaic image
 
 
      if fittype is not None:
-          srclist['ra_orig'] = srcra
-          srclist['dec_orig'] = srcde
-          srclist['ra'] = rdout[:,0]
-          srclist['dec'] = rdout[:,1]
+          srclist['psffit_ra'] = rdout[:,0]
+          srclist['psffit_dec'] = rdout[:,1]
           srclist.add_columns([newflux,jout,wout,fitted,bgfit],
-                              names=[kflux+"_refit_"+fittype,
-                                     ('jout_'+fittype),
-                                     ('wout_'+fittype),
-                                     ('nfitted_'+fittype),
-                                     ('bgfit_'+fittype)])
-          srclist.write(froot+"_"+fittype+"."+cat_filetype,overwrite=True)
+                              names=[kflux+"_psffit_"+fittype,
+                                     ('psffit_jout_'+fittype),
+                                     ('psffit_wout_'+fittype),
+                                     ('psffit_nfitted_'+fittype),
+                                     ('psffit_bkg_'+fittype)])
+          srclist.write(froot+"_phot_cat_"+fittype+"."+cat_filetype,overwrite=True)
           panels=[1,2,3]
      else:
           panels=[1,2]
