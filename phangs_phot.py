@@ -1,8 +1,3 @@
-# This notebook was modified from https://github.com/JaysonAstro/prototype_HST_catalog_photometry/blob/main/HST_cats_with_IRAFStarFinder.ipynb
-# which is based on https://qosmicqi.github.io/XRBID/chapters/photometry.html#sec-runphots
-# and https://www.astropy.org/ccd-reduction-and-photometry-guide/v/pdev/notebooks/photometry/00.00-Preface.html
-
-
 import fnmatch
 import glob
 import numpy as np
@@ -10,7 +5,6 @@ import math
 import matplotlib.pyplot as plt
 import tomllib
 import os
-import pdb
 import warnings
 from sys import exit
 from scipy.spatial import cKDTree
@@ -20,7 +14,7 @@ from astropy import wcs
 from astropy.wcs import WCS, FITSFixedWarning
 from astropy.io import fits
 from astropy.stats import SigmaClip
-from astropy.table import Table, QTable, hstack
+from astropy.table import Table, QTable, hstack, join
 from astropy.coordinates import SkyCoord, match_coordinates_sky
 from astropy.visualization import ImageNormalize, SqrtStretch, LogStretch
 from scipy.ndimage import gaussian_filter as gf
@@ -42,7 +36,7 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config_pahsub.toml'     # Photometry parameters
+config_file = 'config/config_hst_force.toml'     # Photometry parameters
 local_file = 'config/local.toml'       # Paths to directories
 # TODO make flux limits unit-aware
 lowfluxlim = 1e-5 # below this its a nondetection
@@ -317,6 +311,40 @@ def match(
     # Optionally combine columns from both catalogs
     matched_cat = hstack([matched1, matched2], table_names=[keys[0],keys[1]])
     return matched_cat
+
+def combine_by_id( 
+            catalogs,
+            keys_to_discard=[],
+            common_keys=['id'] ):  
+    outcat = {}
+    for iband,band in enumerate(catalogs):
+        catalog = catalogs[band]
+        kk = catalog.colnames.copy()
+        for key in kk:
+            if key in keys_to_discard:
+                del(catalog[key])
+            elif key in common_keys:
+                continue
+            else:
+                catalog.rename_column(key, f"{band}_{key}")
+        kk = list(catalog.meta.keys())
+        for key in kk:
+            # complex meta key types can cause issues if saved to fits 
+            if type(catalog.meta[key]) in [int, float, str, bool, u.quantity.Quantity] and key not in ["date", "aperture_photometry_args"]:
+                catalog.meta[f"{band}_{key}"] = catalog.meta[key]
+            del(catalog.meta[key])
+
+        if iband == 0:
+            outcat= catalog # metadata transfers here
+        else:
+            # really should not need outer since every cat should have all ids, but in case...
+            outcat = join(outcat, catalog, keys=common_keys, join_type='outer') 
+            for key in catalog.meta.keys():                    
+                outcat.meta[key] = catalog.meta[key]
+
+    return outcat   
+
+
 
 
 # ------------------------------------------------
@@ -700,7 +728,7 @@ def get_optimal_aperture(data, sources, max_r=32, brightest=50, frac=0.95, doplo
      norm = fluxes / fluxes[:, [-1]]
      norm[~np.isfinite(norm)] = np.nan
 
-     # comptue median normalized flux
+     # compute median normalized flux
      median_curve = np.nanmedian(norm, axis=0)  
      # Get the index of the radius where the curve of growth reaches the specified fraction of total flux
      idx = np.where(median_curve >= frac)[0]
@@ -827,12 +855,15 @@ def compute_photometry(data,
 
      if use_brightest is not False:
           # Aperture photometry of only brightest sources
-          kbrightness = 'peak_value'
-          if kbrightness not in sources.colnames:
-               # this is the use case of using a previous photometry catalog for forced photometry
-               # on a new image (you put that catalog in "find_cat_filename")
-               # these two cases could be generalized to find a generic flux measurement in the file 
-               kbrightness = 'aperture_flux'
+          # this is the use case of using a previous photometry catalog for forced photometry
+          # on a new image (you put that catalog in "find_cat_filename")
+          # these cases could be generalized to find a generic flux measurement in the file 
+          bkeys = ['peak_value', 'aperture_flux', 'flux_F336W']
+          for bk in bkeys:
+               if bk in sources.colnames:
+                    kbrightness = bk
+                    break
+
           sources = sources[np.argsort(sources[kbrightness])[::-1][:use_brightest]]
           print(f"using only {len(sources)} sources")
 
@@ -960,6 +991,15 @@ def compute_photometry(data,
      phot_full['poisson_SNR'] = phot_full['aperture_flux'] / phot_full['poisson_err']
      phot_full['bkg_SNR'] = phot_full['aperture_flux'] / phot_full['bkg_err']
 
+     phot_full.meta['pixel_scale'] = pixscale
+     phot_full.meta['ap_radius_pix'] = radius
+     phot_full.meta['ap_radius_arcsec'] = radius * phot_full.meta['pixel_scale']
+     phot_full.meta['sky_in_radius_pix'] = radius_sky_in
+     phot_full.meta['sky_in_radius_arcsec'] = radius_sky_in * phot_full.meta['pixel_scale']
+     phot_full.meta['sky_out_radius_pix'] = radius_sky_out
+     phot_full.meta['sky_out_radius_arcsec'] = radius_sky_out * phot_full.meta['pixel_scale']
+     phot_full.meta['apcorr'] = apcorr
+
      # Write the catalog if requested
      if write:
           if phot_cat_filename is None:
@@ -1078,8 +1118,6 @@ def compute_photometry(data,
                ax.scatter(sources_in_cutout['xcenter'], sources_in_cutout['ycenter'], s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
           plt.savefig(out_dir+f"/{gal}_{band}_cutouts_brightest_r{radius:4.2f}.png", dpi=400)
           plt.close(fig)
-
-
 
 
      return apertures, phot_full
@@ -2006,12 +2044,12 @@ def fit_and_subtract(infile, # input mosaic image
           srclist['psffit_ra'] = rdout[:,0]
           srclist['psffit_dec'] = rdout[:,1]
           srclist.add_columns([newflux,jout,wout,fitted,bgfit],
-                              names=[kflux+"_psffit_"+fittype,
-                                     ('psffit_jout_'+fittype),
-                                     ('psffit_wout_'+fittype),
-                                     ('psffit_nfitted_'+fittype),
-                                     ('psffit_bkg_'+fittype)])
-          srclist.write(froot+"_phot_cat_"+fittype+"."+cat_filetype,overwrite=True)
+                              names=["psffit_"+fittype,
+                                     'psffit_'+fittype+'_jout',
+                                     'psffit_'+fittype+'_wout',
+                                     'psffit_'+fittype+'_nfitted',
+                                     'psffit_'+fittype+'_bkg'])
+          srclist.write(froot+"_phot_cat."+cat_filetype,overwrite=True)
           panels=[1,2,3]
      else:
           panels=[1,2]
@@ -2086,6 +2124,8 @@ def fit_and_subtract(infile, # input mosaic image
                plt.savefig(froot+"_apphot_residuals.png")
           plt.close()
 
+     return srclist
+
 
 
 
@@ -2122,6 +2162,14 @@ def cross_match_catalogs(dir, filter, galaxy, phot_full, cat_image3):
     # Match coordinates
     ind_2d_cat, dist_2d, _ = match_coordinates_sky(phot_coords, calib_coords)
     return ind_2d_cat, dist_2d, phot_full
+
+
+
+
+
+
+
+
 
 
 
@@ -2286,7 +2334,8 @@ def do_photometry(
                          xcentroid, ycentroid = current_wcs.all_world2pix(sources['RA_deg'], sources['Dec_deg'], 0)
                          sources['xcentroid'] = xcentroid
                          sources['ycentroid'] = ycentroid
-                    elif 'ra' in sources.colnames and 'dec' in sources.colnames:
+                    elif ('ra' in sources.colnames and 'dec' in sources.colnames) or \
+                         ('raj2000' in sources.colnames and 'dej2000' in sources.colnames):
                          with warnings.catch_warnings():
                               warnings.filterwarnings(
                                    "ignore",
@@ -2294,11 +2343,19 @@ def do_photometry(
                                    category=FITSFixedWarning,
                               )
                               current_wcs = WCS(header)
-                         xcentroid, ycentroid = current_wcs.all_world2pix(
-                              sources['ra'], sources['dec'], 0
-                         )
+                         if 'ra' in sources.colnames and 'dec' in sources.colnames:
+                              xcentroid, ycentroid = current_wcs.all_world2pix(
+                                   sources['ra'], sources['dec'], 0
+                              )
+                         else:
+                              xcentroid, ycentroid = current_wcs.all_world2pix(
+                                   sources['raj2000'], sources['dej2000'], 0
+                              )
                          sources['xcentroid'] = xcentroid
                          sources['ycentroid'] = ycentroid
+
+                    if 'ID_phangs' in sources.colnames:
+                         sources['id'] = sources['ID_phangs']
 
                     # Checks that the colnames include x_centroid, y_centroid, flux, sharpness, roundness, mag, peak, etc. 
                     # and print a warning if any are missing
@@ -2428,7 +2485,7 @@ def do_photometry(
                          fittype=conf['parameters']['psffit']['fittype']
                     else:
                          fittype=None
-                    fit_and_subtract(
+                    catalog = fit_and_subtract(
                          datafile,
                          band=band,
                          srcfile=local['out_dir']+cat_filename, # source catalog to use for fitting 
@@ -2446,6 +2503,10 @@ def do_photometry(
                          radius=r_opt
                     )
 
+                    # Store (replace) the catalog in the catalogs dict
+                    catalogs[gal][band] = catalog
+
+
      return catalogs
 
 
@@ -2456,7 +2517,14 @@ catalogs = do_photometry(
                conf=conf
           )
 
-# TODO combine catalogs for each galaxy across bands especially if its forced position photometry - probably make that mode explicit
+# combine catalogs by ID for each galaxy across bands
+for gal in catalogs:
+    if len(catalogs[gal]) > 1:
+        combined_catalog = combine_by_id(catalogs[gal], 
+                                          keys_to_discard=['aperture_sum', 'aperture_sum_err', 'aperture_sum_abmag', 'aperture_sum_abmag_err', 'xcenter', 'ycenter',
+                                                           'psffit_ra', 'psffit_dec'],
+                                          common_keys=['id','ra','dec'])
+        combined_catalog.write(out_dir + f"{gal}_combined." + cat_filetype, overwrite=True)
 
 exit()
 
