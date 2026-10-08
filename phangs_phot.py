@@ -1000,6 +1000,15 @@ def compute_photometry(data,
      phot_full.meta['sky_out_radius_arcsec'] = radius_sky_out * phot_full.meta['pixel_scale']
      phot_full.meta['apcorr'] = apcorr
 
+     phot_full.meta['pixel_scale'] = pixscale
+     phot_full.meta['ap_radius_pix'] = radius
+     phot_full.meta['ap_radius_arcsec'] = radius * phot_full.meta['pixel_scale']
+     phot_full.meta['sky_in_radius_pix'] = radius_sky_in
+     phot_full.meta['sky_in_radius_arcsec'] = radius_sky_in * phot_full.meta['pixel_scale']
+     phot_full.meta['sky_out_radius_pix'] = radius_sky_out
+     phot_full.meta['sky_out_radius_arcsec'] = radius_sky_out * phot_full.meta['pixel_scale']
+     phot_full.meta['apcorr'] = apcorr
+
      # Write the catalog if requested
      if write:
           if phot_cat_filename is None:
