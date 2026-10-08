@@ -42,8 +42,8 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config_pahsub_force.toml'     # Photometry parameters
-local_file = 'config/local.toml'       # Paths to directories
+config_file = 'config/config.toml'     # Photometry parameters
+local_file = 'config/mpcdf.toml'       # Paths to directories
 
 def load_config(config_path: str) -> dict:
     with open(config_path, "rb") as f:
@@ -68,6 +68,15 @@ num_targets = len(targets)
 
 finder_params = conf['parameters']['source_find']
 phot_params = conf['parameters']['photometry']
+
+# TODO Remove this: hard coding some limits in around the center of ngc1672
+# and changing the axes in plots. Just for testing, not to stay. 
+center_limits = Table.read('/nexus/posix0/MIA-astro-env/eschinner/reho/centres/ecmz_clusters/center_coords.dat', format='ascii')
+x_gal_center = center_limits[center_limits['gal']==targets[0]]['x_center'].item()
+y_gal_center = center_limits[center_limits['gal']==targets[0]]['y_center'].item()
+r_pix = center_limits[center_limits['gal']==targets[0]]['r_pix'].item()
+XLIMS = [x_gal_center - r_pix, x_gal_center + r_pix]
+YLIMS = [y_gal_center - r_pix, y_gal_center + r_pix]
 
 
 def load_filter_data(csv_path=None):
@@ -106,7 +115,7 @@ def get_file(wdir, version, project, galaxy, ptype, filter):
 
      # TODO implement better fallbacks starting with mosaic_ext (default anchored) and then falling back to i2d or types
      print(f"Searching in {path} for {filter} data, with extension: {ptype}")
-     files = glob.glob(path + f"*{filter.lower()}*{ptype}*")
+     files = glob.glob(path + f"*{filter.lower()}*")
      if len(files) > 1:
           print(f"Warning: Multiple files found for {filter} in {path}. Using the first one.")
           print(f"Files found: {files}")
@@ -316,8 +325,8 @@ def match(
 
 def _background_filename_for(image_path):
      """Return the standard cached background filename for an image."""
-     base, _ = os.path.splitext(image_path)
-     return f"{base}_background.fits"
+     base = os.path.splitext(os.path.basename(image_path))[0]
+     return os.path.join(out_dir, f"{base}_background.fits")
 
 
 def calculate_bkg(img,
@@ -376,7 +385,7 @@ def calculate_bkg(img,
           background_path = _background_filename_for(image_path)
           out_header = header.copy() if header is not None else fits.Header()
           hdu = fits.PrimaryHDU(data=np.asarray(bkg.background, dtype=float), header=out_header)
-          hdu.writeto(background_path, overwrite=True)
+          hdu.writeto(background_path, overwrite=False)
           print(f"Saved background map to {background_path}")
 
      # threshold_img = snr_threshold * bkg.background_rms
@@ -397,6 +406,12 @@ def calculate_bkg(img,
           norm_sub = ImageNormalize(vmin=np.nanpercentile(img_sub, 25.00),
                                     vmax=np.nanpercentile(img_sub, 99.99),
                                     stretch=LogStretch())
+          # if band =='f277w' or band==' f300m' or band=='f335m' or band=='f405n' or band=='f444w':
+          #      XLIMS = [1376-141, 1376+141]
+          #      YLIMS = [1682-141, 1682-141]
+          # for i in range(3):
+          #      ax[i].set_xlim(XLIMS[0], XLIMS[1])
+          #      ax[i].set_ylim(YLIMS[0], YLIMS[1])
           ax[2].imshow(img_sub, origin='lower', cmap='inferno', norm=norm_sub)
           ax[2].set_title("Background-subtracted image")
           for a in ax:
@@ -773,7 +788,7 @@ def compute_photometry(data,
      print(f"Doing aperture photometry for {len(sources)} sources...")
      kx = 'xcentroid'; ky = 'ycentroid'
      if kx not in sources.colnames or ky not in sources.colnames:
-          kx = 'xcenter'; ky = 'ycenter'
+          kx = 'x_center'; ky = 'y_center'
      positions = np.transpose((sources[kx], sources[ky]))
      apertures = CircularAperture(positions, r=radius)
      aper_stats = ApertureStats(data, apertures, error=err)
@@ -829,7 +844,7 @@ def compute_photometry(data,
                category=FITSFixedWarning,
           )
           wcs = WCS(header)
-     ra, dec = wcs.all_pix2world(phot_full["xcenter"], phot_full["ycenter"], 0)
+     ra, dec = wcs.all_pix2world(phot_full["x_center"], phot_full["y_center"], 0)
      phot_full["ra"] = ra
      phot_full["dec"] = dec
 
@@ -903,6 +918,8 @@ def compute_photometry(data,
                                 stretch=LogStretch())
           ax.imshow(data, origin='lower', cmap='inferno', norm=norm)
           ax.set_title(f"{gal.upper()} {band.upper()}")
+          ax.set_xlim(XLIMS[0], XLIMS[1])
+          ax.set_ylim(YLIMS[0], YLIMS[1])
           # z=np.where(phot_full['aperture_flux_mJy']/phot_full['poisson_err_mJy']>5)[0]
           # ax.scatter(sources['xcentroid'][z], sources['ycentroid'][z], s=10, edgecolor='cyan', facecolor='none', lw=0.5, alpha=0.3,label="Poisson SNR>5")
           label_low_snr_values = False  # Set to True to label each red low-SNR source with its SNR value
@@ -911,8 +928,8 @@ def compute_photometry(data,
           hi_label_added = False
           lo_label_added = False
           for idx in range(len(phot_full)):
-               x = phot_full['xcenter'][idx]
-               y = phot_full['ycenter'][idx]
+               x = phot_full['x_center'][idx]
+               y = phot_full['y_center'][idx]
                linewidth = 1
                alpha = 0.7     
                if snr[idx] > err_threshold:
@@ -944,19 +961,20 @@ def compute_photometry(data,
           # brightest_sources_apcorr = phot_full[nonan][np.argsort(phot_full['aperture_flux_mJy'][nonan])[::-1]][:36]
           # instead of re-sorting, leave these in the order from the finder which sorted them from brightest
           # peak to lower peak values
-          brightest_sources_apcorr = phot_full[:36]
+          # brightest_sources_apcorr = phot_full[:36]
+          brightest_sources_apcorr = phot_full[np.argsort(phot_full['aperture_sum_abmag_apcorr'])[::-1][:36]]
           # brightest_sources_apcorr = phot_full[nonan][:36]
           fig, axes = plt.subplots(6, 6, figsize=(10, 10), 
                                    gridspec_kw={'left':0.02,'bottom':0.02,'top':0.98,'right':0.98,
                                                 'wspace': 0.01, 'hspace': 0.01})
           for i, (ax, row) in enumerate(zip(axes.flatten(), brightest_sources_apcorr)):
-               x, y = row['xcenter'], row['ycenter']
+               x, y = row['x_center'], row['y_center']
                cutout_size = np.maximum(radius*4, radius_sky_out*1.1) # actually, half-cutout size
                x_min, x_max = int(x - cutout_size), int(x + cutout_size)
                y_min, y_max = int(y - cutout_size), int(y + cutout_size)
                cutout = data[y_min:y_max, x_min:x_max]
-               norm_cutout = ImageNormalize(vmin=np.nanpercentile(cutout, 0), 
-                                            vmax=np.nanpercentile(cutout, 100),
+               norm_cutout = ImageNormalize(vmin=np.nanpercentile(cutout, 2), 
+                                            vmax=np.nanpercentile(cutout, 96),
                                             # stretch=SqrtStretch()
                )
                ax.imshow(data, origin='lower', cmap='inferno', norm=norm_cutout)
@@ -979,13 +997,89 @@ def compute_photometry(data,
                ax.text(0.5, 0.9, f"{row['aperture_flux_mJy']*1000:.1f}uJy ({row['bkg_flux_mJy']*1000:.2f})", color='white', fontsize=8, ha='center', va='center', transform=ax.transAxes)
                ax.text(0.08, 0.93, f"{i+1}", color='cyan', fontsize=8, ha='center', va='center', transform=ax.transAxes)
                # Select all sources in the catalog that are within the cutout region
-               sources_in_cutout = phot_full[(phot_full['xcenter'] > x_min) & (phot_full['xcenter'] < x_max) & (phot_full['ycenter'] > y_min) & (phot_full['ycenter'] < y_max)]
-               ax.scatter(sources_in_cutout['xcenter'], sources_in_cutout['ycenter'], s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
+               sources_in_cutout = phot_full[(phot_full['x_center'] > x_min) & (phot_full['x_center'] < x_max) & (phot_full['y_center'] > y_min) & (phot_full['y_center'] < y_max)]
+               ax.scatter(sources_in_cutout['x_center'], sources_in_cutout['y_center'], s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
           plt.savefig(out_dir+f"/{gal}_{band}_cutouts_brightest_r{radius:4.2f}.png", dpi=400)
           plt.close(fig)
 
 
+          # New plot: 6x6 cutouts with sigma-clipped pixels (in annulus) shown in white
+          fig, axes = plt.subplots(6, 6, figsize=(10, 10),
+                                   gridspec_kw={'left': 0.02, 'bottom': 0.02, 'top': 0.98, 'right': 0.98,
+                                             'wspace': 0.01, 'hspace': 0.01})
 
+          for i, (ax, row) in enumerate(zip(axes.flatten(), brightest_sources_apcorr)):
+               x, y = row['x_center'], row['y_center']
+               cutout_size = np.maximum(radius * 4, radius_sky_out * 1.1)
+               x_min, x_max = int(x - cutout_size), int(x + cutout_size)
+               y_min, y_max = int(y - cutout_size), int(y + cutout_size)
+               cutout = data[y_min:y_max, x_min:x_max]
+               
+               # # Create coordinate grid relative to cutout center
+               y_grid, x_grid = np.mgrid[y_min:y_max, x_min:x_max]
+               center_x, center_y = x_grid.shape[1] // 2, x_grid.shape[0] // 2
+               r = np.sqrt((x_grid - center_x)**2 + (y_grid - center_y)**2)
+               
+               # Define annulus mask: between radius_sky_in and radius_sky_out
+               annulus_mask = (r >= radius_sky_in) & (r <= radius_sky_out)
+               
+               # Compute sky statistics in annulus
+               sky_vals = cutout[annulus_mask]
+               mean_sky = np.nanmedian(sky_vals)
+               std_sky = np.nanstd(sky_vals)
+               
+               # Sigma clip: flag pixels > mean ± 3σ in annulus
+               sigma_clip = 2.0
+               clip_mask = np.abs(cutout - mean_sky) > sigma_clip * std_sky
+               clip_mask = clip_mask & annulus_mask  # Only apply to annulus
+               
+               # Prepare display: remove clipped pixels from main image
+               display_cutout = cutout.copy()
+               display_cutout[clip_mask] = np.nan
+               
+               # Normalize display
+               norm_cutout = ImageNormalize(vmin=np.nanpercentile(cutout, 2),
+                                             vmax=np.nanpercentile(cutout, 96),
+                                             stretch=SqrtStretch())
+               
+               # Plot main image
+               ax.imshow(data, origin='lower', cmap='inferno', norm=norm_cutout)
+               
+               # Overlay clipped pixels in white
+               ax.imshow(clip_mask, origin='lower', cmap='gray', alpha=1.0)
+               
+               # Draw circles
+               circle = plt.Circle((center_x, center_y), radius, edgecolor='red', facecolor='none', lw=1.5, alpha=1.0)
+               sky_in_circle = plt.Circle((center_x, center_y), radius_sky_in, edgecolor='magenta', facecolor='none', lw=1.5, alpha=0.5)
+               sky_out_circle = plt.Circle((center_x, center_y), radius_sky_out, edgecolor='magenta', facecolor='none', lw=1.5, alpha=0.5)
+               ax.add_patch(circle)
+               ax.add_patch(sky_in_circle)
+               ax.add_patch(sky_out_circle)
+          
+               # Label source
+               ax.text(0.5, 0.9, f"{row['aperture_flux_mJy']*1000:.1f}uJy ({row['bkg_flux_mJy']*1000:.2f})", 
+                         color='white', fontsize=8, ha='center', va='center', transform=ax.transAxes)
+               ax.text(0.08, 0.93, f"{i+1}", color='cyan', fontsize=8, ha='center', va='center', transform=ax.transAxes)
+               
+               # Plot other sources in cutout (adjusted to cutout coordinates)
+               sources_in_cutout = phot_full[
+                    (phot_full['x_center'] >= x_min) & (phot_full['x_center'] < x_max) &
+                    (phot_full['y_center'] >= y_min) & (phot_full['y_center'] < y_max)
+               ]
+               valid_sources = sources_in_cutout[
+                    np.isfinite(sources_in_cutout['x_center']) & np.isfinite(sources_in_cutout['y_center'])
+               ]
+               ax.scatter(valid_sources['x_center'] - x_min, valid_sources['y_center'] - y_min,
+                              s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
+               
+               # Set axis limits and turn off axes
+               ax.set_xlim(0, x_grid.shape[1])
+               ax.set_ylim(0, y_grid.shape[0])
+               ax.axis('off')
+
+          # Save and close
+          plt.savefig(out_dir + f"/{gal}_{band}_cutouts_brightest_r{radius:4.2f}_sigmaclip.png", dpi=400)
+          plt.close(fig)          
 
      return apertures, phot_full
 
@@ -1897,48 +1991,51 @@ def fit_and_subtract(infile, # input mosaic image
                                    plt.plot(xy[0]+ct*rpix,xy[1]+st*rpix,'y',linewidth=3)
 
           # save the residual image after fitting
+
+          # Making sure everything is saved in the output directory, not the current working directory
+          outbase = os.path.join(out_dir, os.path.basename(infile)[:-5])
           if doregion:
                s=subim.shape
                plt.xlim(plotborder*sfitrgn_pix[0],s[1]-plotborder*sfitrgn_pix[0])
                plt.ylim(plotborder*sfitrgn_pix[1],s[0]-plotborder*sfitrgn_pix[1])
                inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=resid
-               inhdu.writeto(infile[:-5]+"_resid_region_"+fittype+".fits",overwrite=True)
+               inhdu.writeto(outbase+"_resid_region_"+fittype+".fits",overwrite=True)
           else:
                inhdu.data=resid
-               inhdu.writeto(infile[:-5]+"_resid_"+fittype+".fits",overwrite=True)
+               inhdu.writeto(outbase+"_resid_"+fittype+".fits",overwrite=False)
 
           # save the model image after fitting
           if doregion:
                inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=model
-               inhdu.writeto(infile[:-5]+"_model_region_"+fittype+".fits",overwrite=True)
+               inhdu.writeto(outbase+"_model_region_"+fittype+".fits",overwrite=True)
           else:
                inhdu.data=model
-               inhdu.writeto(infile[:-5]+"_model_"+fittype+".fits",overwrite=True)
+               inhdu.writeto(outbase+"_model_"+fittype+".fits",overwrite=True)
 
 
      # save the residual image without fitting
      resid_suffix = f"_resid_apphot_r{radius:4.2f}" if radius is not None else "_resid_apphot"
      if doregion:
           inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=resid_nofit
-          inhdu.writeto(infile[:-5]+resid_suffix+"_region.fits",overwrite=True)
+          inhdu.writeto(outbase+resid_suffix+"_region.fits",overwrite=True)
      else:
           inhdu.data=resid_nofit
-          inhdu.writeto(infile[:-5]+resid_suffix+".fits",overwrite=True)
+          inhdu.writeto(outbase+resid_suffix+".fits",overwrite=True)
      # save the model image without fitting
      model_suffix = f"_model_apphot_r{radius:4.2f}" if radius is not None else "_model_apphot"
      if doregion:
           inhdu.data[subim_xy[0][1]:subim_xy[1][1]+1,subim_xy[1][0]:subim_xy[0][0]+1]=model_nofit
-          inhdu.writeto(infile[:-5]+model_suffix+"_region.fits",overwrite=True)
+          inhdu.writeto(outbase+model_suffix+"_region.fits",overwrite=True)
      else:
           inhdu.data=model_nofit
-          inhdu.writeto(infile[:-5]+model_suffix+".fits",overwrite=True)
+          inhdu.writeto(outbase+model_suffix+".fits",overwrite=True)
 
 
      if fittype is not None:
           srclist['ra'] = srcra
           srclist['dec'] = srcde
           srclist.add_columns([newflux,jout,fitted],names=[kflux+"_refit_"+fittype,('jout_%4.1f_'%wave)+fittype,('nfitted_%4.1f_'%wave)+fittype])
-          srclist.write(froot+"_refit.csv",overwrite=True)
+          srclist.write(froot+"_refit.csv",overwrite=False)
      
      
      if doplot:
@@ -2029,22 +2126,6 @@ def cross_match_catalogs(dir, filter, galaxy, phot_full, cat_image3):
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #=====================================================================================
 # MAIN 
 
@@ -2064,12 +2145,10 @@ print("-----------------------------------------")
 # Check that input data directory exists
 if not os.path.exists(jwst_dir):
      raise FileNotFoundError(f"JWST data directory {jwst_dir} does not exist. Please check the path in the config file.")
-     exit()
 
 # Check that out_dir exists
 if not os.path.exists(out_dir):
      raise FileNotFoundError(f"Output directory {out_dir} does not exist.")
-     exit()
 
 
 # This is only still here temporarily
@@ -2200,8 +2279,6 @@ def do_photometry(
                     # Checks that the colnames include x_centroid, y_centroid, flux, sharpness, roundness, mag, peak, etc. 
                     # and print a warning if any are missing
                     required_cols = ['xcentroid', 'ycentroid', 'flux']
-                    x_to_search_for = ['xcentroid', 'x_center', 'x_centroid', 'xcenter']
-                    y_to_search_for = ['ycentroid', 'y_center', 'y_centroid', 'ycenter']
                     # Cycle through
                     for col in required_cols:
                          if col not in sources.colnames:
@@ -2335,4 +2412,3 @@ catalogs = do_photometry(
 
 
 exit()
-

@@ -1,13 +1,15 @@
 # Directories will be set in a locals file, not the config
 
-steps = ["source_find", "subtract_bkg", "aperture_photometry", "apcorr_step"]
+steps = ["source_find", "subtract_bkg", "aperture_photometry", "apcorr"]
 targets = ["ngc1672"]
 product = ["anchor"]
-bands = ["f164n", "f187n", "f212n", "f277w", "f405n", "f444w"]
+# bands = ["f187n", "f212n", "f277w", "f335m", "f405n", "f444w"]
+bands = ["f150w"]
 version = 'v4p1'
 ptype = ["images"]
 projects = ["4793"]
 inst = ["NIRCam"]
+cat_filetype = "fits"    # csv, fits, or other type that astropy table recognizes
 
 [parameters.r_opt]
 
@@ -28,7 +30,7 @@ sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
 # This really needs to be read from somewhere else.
 dist_Mpc = 12.0     
-plot = false
+plot = true
 
 [parameters.source_find]
 
