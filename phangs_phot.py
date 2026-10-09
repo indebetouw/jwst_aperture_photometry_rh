@@ -936,6 +936,8 @@ def compute_photometry(data,
         phot_full['finder_peak'] = sources['peak_value']   
     if 'reject' in sources.colnames:
         phot_full['finder_centroid_fail'] = sources['reject']
+    if 'id' in sources.colnames:
+        phot_full['id'] = sources['id']
 
     # Include ra, dec
     with warnings.catch_warnings():
@@ -947,8 +949,8 @@ def compute_photometry(data,
         wcs = WCS(header)
     ra, dec = wcs.all_pix2world(phot_full["xcenter"], phot_full["ycenter"], 0)
     pixscale = wcs.proj_plane_pixel_scales()[0].to("arcsec")
-    phot_full["ra"] = ra
-    phot_full["dec"] = dec
+    phot_full["ra"]  = np.round(ra ,8)
+    phot_full["dec"] = np.round(dec,8)
 
     # Convert flux from the source finder in table (converted to AB magnitudes)
     if 'finder_flux' in phot_full.colnames:
@@ -2534,7 +2536,7 @@ for gal in catalogs:
         combined_catalog = combine_by_id(catalogs[gal], 
                                           keys_to_discard=['aperture_sum', 'aperture_sum_err', 'aperture_sum_abmag', 'aperture_sum_abmag_err', 'xcenter', 'ycenter',
                                                            'psffit_ra', 'psffit_dec'],
-                                          common_keys=['id']) # ,'ra','dec'])
+                                          common_keys=['id','ra','dec'])
         combined_catalog.write(out_dir + f"{gal}_combined." + cat_filetype, overwrite=True)
 
 exit()
