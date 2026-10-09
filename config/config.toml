@@ -51,13 +51,18 @@ apcorr_method = 'crds'
 
 use_brightest = false
 fwhm2rad = 2.5
+# this cannot be true if r_opt is in the steps - the code will stop with a warning
+use_filter_fwhm = false
+# this can be a scalar or an array corresponding to bands
+ap_radius_arcsec = 0.2
+# these can be in pixels, or a string with r, like "2r" to be a muliple of the aperture radius
 radius_sky_in = 5
 radius_sky_out = 10
 sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
 write = true
 overwrite = true
-cat_filetype = "fits"    # csv, fits, or other type that astropy table recognizes
+cat_filetype = "ecsv"    # ecsv, fits, or other type that astropy table recognizes that preserves units (plain csv won't work)
 local_bkg_subtract = true
 
 [parameters.residual]

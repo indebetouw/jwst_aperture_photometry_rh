@@ -36,7 +36,7 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config_pahsub.toml'     # Photometry parameters
+config_file = 'config/config_hst_force.toml'     # Photometry parameters
 local_file = 'config/local.toml'       # Paths to directories
 # TODO make flux limits unit-aware
 lowfluxlim = 1e-5 # below this its a nondetection
@@ -66,6 +66,11 @@ num_targets = len(targets)
 
 finder_params = conf['parameters']['source_find']
 phot_params = conf['parameters']['photometry']
+
+use_filter_fwhm = phot_params['use_filter_fwhm']
+
+if use_filter_fwhm and "r_opt" in steps:
+    raise ValueError("use_filter_fwhm=True cannot be used with r_opt step")
 
 
 def load_filter_data(csv_path=None):
@@ -1234,10 +1239,8 @@ def get_apcorr_params(crds_dir, band, inst, eefraction_value=0.8, apcorr_method=
                     "\n Please chose a different aperture correction method in the config file [i.e. 'crds']."
             )
             
-            # TODO: get the pixel scale properly from header info
-            # These correction factors are only valid for a specific radius.
-            # pixel_scale = 0.031
-            radius = 4 #* pixel_scale
+            # WARNING: these radii are only valid for NIRCAM SHORT, not NIRCAM LONG
+            radius = 4 
             an_in = 2.
             an_out = 3. 
             sky_in = an_in * radius
@@ -2216,8 +2219,6 @@ if not os.path.exists(out_dir):
     exit()
 
 
-# This is only still here temporarily
-use_filter_fwhm = True 
 
 def do_photometry(
         steps, 
@@ -2266,20 +2267,20 @@ def do_photometry(
             conf['parameters']['bkg_subtract']['dist_Mpc'] = dist_Mpc
             print(f"Distance for {gal}: {dist_Mpc} Mpc")
 
+            pix_scale = get_pixarea_in_sr(header) ** 0.5 * (180/np.pi) * 3600  # arcsec/pixel
+
             # Subtract background 
             if 'subtract_bkg' in steps:
                 print()
                 print(f"Subtracting background for {gal} at {band}...")
                 if 'box_size_pix' not in conf['parameters']['bkg_subtract']:
                     # Convert box size from pc to pixels using the pixel scale from the header
-                    pix_scale = get_pixarea_in_sr(header) ** 0.5 * (180/np.pi) * 3600  # arcsec/pixel
                     box_size_pc = conf['parameters']['bkg_subtract']['box_size_pc']
                     box_size_pix = int(box_size_pc * 206265 / (pix_scale * dist_Mpc * 1e6 ))
                     conf['parameters']['bkg_subtract']['box_size_pix'] = box_size_pix
 
                 if 'filter_size_pix' not in conf['parameters']['bkg_subtract']:
                     # Convert filter size from pc to pixels using the pixel scale from the header
-                    pix_scale = get_pixarea_in_sr(header) ** 0.5 * (180/np.pi) * 3600  # arcsec/pixel
                     filter_size_pc = conf['parameters']['bkg_subtract']['filter_size_pc']
                     filter_size_pix = int(filter_size_pc * 206265/ (pix_scale * dist_Mpc * 1e6 ))
                     conf['parameters']['bkg_subtract']['filter_size_pix'] = filter_size_pix
@@ -2390,7 +2391,17 @@ def do_photometry(
                 )
             else:
                 fwhm2rad = conf['parameters']['photometry'].get('fwhm2rad', 2.5)
-                r_opt = filter_fwhm_pix[band.upper()] * fwhm2rad if use_filter_fwhm else conf['parameters']['photometry']['aperture_radius']
+                if use_filter_fwhm:
+                    r_opt = filter_fwhm_pix[band.upper()] * fwhm2rad
+                else:
+                    r_opt = conf['parameters']['photometry']['aperture_radius_arcsec']
+                    if type(r_opt) == list:
+                        if len(r_opt) != len(bands):
+                            raise ValueError("Length of r_opt list must match the number of bands.")
+                        r_opt = r_opt[bands.index(band)]
+                    r_opt /= pix_scale  # Convert from arcseconds to pixels
+                    print(f"Using fixed aperture radius of {r_opt*pix_scale} arcsec.")
+
                 if 'aperture_photometry' in steps:
                     print(f"Using fixed aperture radius of {r_opt} pixels for photometry.")
 
