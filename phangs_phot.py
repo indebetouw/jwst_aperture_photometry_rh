@@ -36,8 +36,8 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config_hst_force.toml'     # Photometry parameters
-local_file = 'config/local.toml'       # Paths to directories
+config_file = 'config/config.toml'     # Photometry parameters
+local_file = 'config/mpcdf.toml'       # Paths to directories
 # TODO make flux limits unit-aware
 lowfluxlim = 1e-5 # below this its a nondetection
 
@@ -1127,83 +1127,7 @@ def compute_photometry(data,
         plt.close(fig)
 
 
-          # New plot: 6x6 cutouts with sigma-clipped pixels (in annulus) shown in white
-          fig, axes = plt.subplots(6, 6, figsize=(10, 10),
-                                   gridspec_kw={'left': 0.02, 'bottom': 0.02, 'top': 0.98, 'right': 0.98,
-                                             'wspace': 0.01, 'hspace': 0.01})
 
-          for i, (ax, row) in enumerate(zip(axes.flatten(), brightest_sources_apcorr)):
-               x, y = row['x_center'], row['y_center']
-               cutout_size = np.maximum(radius * 4, radius_sky_out * 1.1)
-               x_min, x_max = int(x - cutout_size), int(x + cutout_size)
-               y_min, y_max = int(y - cutout_size), int(y + cutout_size)
-               cutout = data[y_min:y_max, x_min:x_max]
-               
-               # # Create coordinate grid relative to cutout center
-               y_grid, x_grid = np.mgrid[y_min:y_max, x_min:x_max]
-               center_x, center_y = x_grid.shape[1] // 2, x_grid.shape[0] // 2
-               r = np.sqrt((x_grid - center_x)**2 + (y_grid - center_y)**2)
-               
-               # Define annulus mask: between radius_sky_in and radius_sky_out
-               annulus_mask = (r >= radius_sky_in) & (r <= radius_sky_out)
-               
-               # Compute sky statistics in annulus
-               sky_vals = cutout[annulus_mask]
-               mean_sky = np.nanmedian(sky_vals)
-               std_sky = np.nanstd(sky_vals)
-               
-               # Sigma clip: flag pixels > mean ± 3σ in annulus
-               sigma_clip = 2.0
-               clip_mask = np.abs(cutout - mean_sky) > sigma_clip * std_sky
-               clip_mask = clip_mask & annulus_mask  # Only apply to annulus
-               
-               # Prepare display: remove clipped pixels from main image
-               display_cutout = cutout.copy()
-               display_cutout[clip_mask] = np.nan
-               
-               # Normalize display
-               norm_cutout = ImageNormalize(vmin=np.nanpercentile(cutout, 2),
-                                             vmax=np.nanpercentile(cutout, 96),
-                                             stretch=SqrtStretch())
-               
-               # Plot main image
-               ax.imshow(data, origin='lower', cmap='inferno', norm=norm_cutout)
-               
-               # Overlay clipped pixels in white
-               ax.imshow(clip_mask, origin='lower', cmap='gray', alpha=1.0)
-               
-               # Draw circles
-               circle = plt.Circle((center_x, center_y), radius, edgecolor='red', facecolor='none', lw=1.5, alpha=1.0)
-               sky_in_circle = plt.Circle((center_x, center_y), radius_sky_in, edgecolor='magenta', facecolor='none', lw=1.5, alpha=0.5)
-               sky_out_circle = plt.Circle((center_x, center_y), radius_sky_out, edgecolor='magenta', facecolor='none', lw=1.5, alpha=0.5)
-               ax.add_patch(circle)
-               ax.add_patch(sky_in_circle)
-               ax.add_patch(sky_out_circle)
-          
-               # Label source
-               ax.text(0.5, 0.9, f"{row['aperture_flux_mJy']*1000:.1f}uJy ({row['bkg_flux_mJy']*1000:.2f})", 
-                         color='white', fontsize=8, ha='center', va='center', transform=ax.transAxes)
-               ax.text(0.08, 0.93, f"{i+1}", color='cyan', fontsize=8, ha='center', va='center', transform=ax.transAxes)
-               
-               # Plot other sources in cutout (adjusted to cutout coordinates)
-               sources_in_cutout = phot_full[
-                    (phot_full['x_center'] >= x_min) & (phot_full['x_center'] < x_max) &
-                    (phot_full['y_center'] >= y_min) & (phot_full['y_center'] < y_max)
-               ]
-               valid_sources = sources_in_cutout[
-                    np.isfinite(sources_in_cutout['x_center']) & np.isfinite(sources_in_cutout['y_center'])
-               ]
-               ax.scatter(valid_sources['x_center'] - x_min, valid_sources['y_center'] - y_min,
-                              s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
-               
-               # Set axis limits and turn off axes
-               ax.set_xlim(0, x_grid.shape[1])
-               ax.set_ylim(0, y_grid.shape[0])
-               ax.axis('off')
-
-          # Save and close
-          plt.savefig(out_dir + f"/{gal}_{band}_cutouts_brightest_r{radius:4.2f}_sigmaclip.png", dpi=400)
-          plt.close(fig)          
 
     return apertures, phot_full
 
