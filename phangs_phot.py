@@ -295,8 +295,8 @@ def match(
     npix=2, 
     keys=['catalog1', 'catalog2']):
     
-    coords2 = np.array([catalog2['xcenter'], catalog2['ycenter']]).T
-    coords1 = np.array([catalog1['xcenter'], catalog1['ycenter']]).T
+    coords2 = np.array([catalog2['x_center'], catalog2['y_center']]).T
+    coords1 = np.array([catalog1['x_center'], catalog1['y_center']]).T
     # Build a KD-tree for the first catalog
     tree = cKDTree(coords2)
 
@@ -894,7 +894,7 @@ def compute_photometry(data,
     print(f"Doing aperture photometry for {len(sources)} sources...")
     kx = 'xcentroid'; ky = 'ycentroid'
     if kx not in sources.colnames or ky not in sources.colnames:
-        kx = 'xcenter'; ky = 'ycenter'
+        kx = 'x_center'; ky = 'y_center'
     positions = np.transpose((sources[kx], sources[ky]))
     apertures = CircularAperture(positions, r=radius)
     aper_stats = ApertureStats(data, apertures, error=err)
@@ -947,7 +947,7 @@ def compute_photometry(data,
             category=FITSFixedWarning,
         )
         wcs = WCS(header)
-    ra, dec = wcs.all_pix2world(phot_full["xcenter"], phot_full["ycenter"], 0)
+    ra, dec = wcs.all_pix2world(phot_full["x_center"], phot_full["y_center"], 0)
     pixscale = wcs.proj_plane_pixel_scales()[0].to("arcsec")
     phot_full["ra"]  = np.round(ra ,8)
     phot_full["dec"] = np.round(dec,8)
@@ -1044,8 +1044,8 @@ def compute_photometry(data,
         hi_label_added = False
         lo_label_added = False
         for idx in range(len(phot_full)):
-            x = phot_full['xcenter'][idx]
-            y = phot_full['ycenter'][idx]
+            x = phot_full['x_center'][idx]
+            y = phot_full['y_center'][idx]
             linewidth = 1
             alpha = 0.7     
             if snr[idx] > err_threshold:
@@ -1087,7 +1087,7 @@ def compute_photometry(data,
                                  gridspec_kw={'left':0.02,'bottom':0.02,'top':0.98,'right':0.98,
                                               'wspace': 0.01, 'hspace': 0.01})
         for i, (ax, row) in enumerate(zip(axes.flatten(), brightest_sources_apcorr)):
-            x, y = row['xcenter'], row['ycenter']
+            x, y = row['x_center'], row['y_center']
             cutout_size = np.max([radius*4, radius_sky_out*1.1, min_halfcut_pix]) # actually, half-cutout size
             x_min, x_max = int(x - cutout_size), int(x + cutout_size)
             y_min, y_max = int(y - cutout_size), int(y + cutout_size)
@@ -1121,8 +1121,8 @@ def compute_photometry(data,
             #ax.text(0.08, 0.05, f"{x:.0f},{y:.0f}", color='cyan', fontsize=8, ha='left', va='center', transform=ax.transAxes)
             ax.text(0.08, 0.05, f"{row['ra']:.4f},{row['dec']:.4f}", color='cyan', fontsize=6, ha='left', va='center', transform=ax.transAxes)
             # Select all sources in the catalog that are within the cutout region
-            sources_in_cutout = phot_full[(phot_full['xcenter'] > x_min) & (phot_full['xcenter'] < x_max) & (phot_full['ycenter'] > y_min) & (phot_full['ycenter'] < y_max)]
-            ax.scatter(sources_in_cutout['xcenter'], sources_in_cutout['ycenter'], s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
+            sources_in_cutout = phot_full[(phot_full['x_center'] > x_min) & (phot_full['x_center'] < x_max) & (phot_full['y_center'] > y_min) & (phot_full['y_center'] < y_max)]
+            ax.scatter(sources_in_cutout['x_center'], sources_in_cutout['y_center'], s=50, edgecolor='cyan', facecolor='none', lw=1.0, alpha=0.5)
         plt.savefig(out_dir+f"/{gal}_{band}_cutouts_brightest_r{radius:4.2f}.png", dpi=400)
         plt.close(fig)
 
@@ -2341,13 +2341,13 @@ def do_photometry(
                 # Checks that the colnames include x_centroid, y_centroid, flux, sharpness, roundness, mag, peak, etc. 
                 # and print a warning if any are missing
                 required_cols = ['xcentroid', 'ycentroid', 'flux']
-                x_to_search_for = ['xcentroid', 'x_center', 'x_centroid', 'xcenter']
-                y_to_search_for = ['ycentroid', 'y_center', 'y_centroid', 'ycenter']
+                x_to_search_for = ['xcentroid', 'x_center', 'x_centroid', 'x_center']
+                y_to_search_for = ['ycentroid', 'y_center', 'y_centroid', 'y_center']
                 # Cycle through
                 # TODO this looks like x_to_search_for was not fully wired into the ifelse here:
                 for col in required_cols:
                     if col not in sources.colnames:
-                        # Check whether there is a xcenter and ycenter column instead of x_centroid and y_centroid, and if so, rename them
+                        # Check whether there is a x_center and y_center column instead of x_centroid and y_centroid, and if so, rename them
                         if col == 'xcentroid' and 'x_center' in sources.colnames:
                             sources['xcentroid'] = sources['x_center']
                         elif col == 'ycentroid' and 'y_center' in sources.colnames:
@@ -2512,7 +2512,7 @@ catalogs = do_photometry(
 for gal in catalogs:
     if len(catalogs[gal]) > 1:
         combined_catalog = combine_by_id(catalogs[gal], 
-                                          keys_to_discard=['aperture_sum', 'aperture_sum_err', 'aperture_sum_abmag', 'aperture_sum_abmag_err', 'xcenter', 'ycenter',
+                                          keys_to_discard=['aperture_sum', 'aperture_sum_err', 'aperture_sum_abmag', 'aperture_sum_abmag_err', 'x_center', 'y_center',
                                                            'psffit_ra', 'psffit_dec'],
                                           common_keys=['id','ra','dec'])
         combined_catalog.write(out_dir + f"{gal}_combined." + cat_filetype, overwrite=True)
