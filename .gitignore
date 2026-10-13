@@ -5,5 +5,13 @@ __pycache__/
 /config/mac.toml
 jwst_aperture_photometry_rh.code-workspace
 config/local.toml
+.vscode/
+.ipynb_checkpoints/
 .vscode/settings.json
 .vscode/launch.json
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
