@@ -2,7 +2,6 @@
 # note: we don't have a way to save the bkgsub image yet so it has to be recreated if you do find or aperture_photometry
 
 steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr", "residual", "psffit"]
-# steps = ["psffit"]
 # steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr"] 
 targets = ["ngc3351"]
 product = ""
@@ -15,7 +14,7 @@ inst = ["NIRCam"]
 # note, this has to keep units - e.g. ecsv works but not csv
 cat_filetype = "ecsv"
 
-doregion = true
+doregion = false
 # NGC5068 [199.729, -21.040]. # .01
 region_center =  [160.9913, 11.7050] # 3351 N ring r=0.002
 #region_center =  [161.005, 11.696] # 3351 E r=0.005

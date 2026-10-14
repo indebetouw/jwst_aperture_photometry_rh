@@ -9,11 +9,11 @@ from astropy.table import Table
 
 
 phot_dir = Path("/Users/ri3e/cv/galaxies/phot")
-cat1_path = phot_dir / "ngc5068_jwst_convolved_pah_f360m_phot_cat_r1.91.csv"
-cat2_path = phot_dir / "ngc5068_jwst_convolved_pah_f360m_phot_cat_r3.81.csv"
-out_plot = phot_dir / "ngc5068_fwh2rad1_vs_2_flux_compare.png"
+cat1_path = phot_dir / "ngc3351_convolved_pah_f360m_phot_cat_r2.86.ecsv"
+cat2_path = phot_dir / "ngc3351_pahfind/ngc3351_convolved_pah_f360m_phot_cat_r2.86.ecsv"
+out_plot  = phot_dir / "ngc3351_postTAB_flux_compare.png"
 flux_col = "aperture_flux_mJy"
-flux_col2 = "aperture_flux_mJy_apcorr"
+flux_col2 = "aperture_flux_mJy"
 
 cat1 = Table.read(cat1_path)
 cat2 = Table.read(cat2_path)
@@ -58,7 +58,7 @@ ax.set_xscale("log")
 ax.set_yscale("log")
 ax.set_xlabel("Flux from fwh2rad1.0 catalog (mJy)")
 ax.set_ylabel("Flux from fwh2rad2.0 catalog (mJy)")
-ax.set_title("NGC5068 convolved_pah_f360m flux comparison")
+ax.set_title("NGC3351 convolved_pah_f360m flux comparison")
 
 plt.tight_layout()
 plt.savefig(out_plot, dpi=200)
