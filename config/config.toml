@@ -1,13 +1,18 @@
 # Directories will be set in a locals file, not the config
 
-steps = ["source_find", "subtract_bkg", "aperture_photometry", "apcorr_step"]
+steps = ["source_find", "subtract_bkg", "aperture_photometry", "apcorr"]
 targets = ["ngc1672"]
 product = ["anchor"]
-bands = ["f164n", "f187n", "f212n", "f277w", "f405n", "f444w"]
+# bands = ["f187n", "f212n", "f277w", "f335m", "f405n", "f444w"]
+bands = ["f150w"]
 version = 'v4p1'
 ptype = ["images"]
 projects = ["4793"]
 inst = ["NIRCam"]
+cat_filetype = "fits"    # csv, fits, or other type that astropy table recognizes
+
+doregion = false
+region_center = [160.9902, 11.7022]
 
 [parameters.r_opt]
 
@@ -28,7 +33,7 @@ sigma_to_clip_bkg = 3.0
 maxiters_for_bkg_clip = 5
 # This really needs to be read from somewhere else.
 dist_Mpc = 12.0     
-plot = false
+plot = true
 
 [parameters.source_find]
 
@@ -39,7 +44,7 @@ roundlo = -0.5
 roundhi = 1.0
 sharplo = 0.05
 sharphi = 1.0
-nsources = 500000
+nsources = 10000
 cat_filename = 'ngc1672_uvisacsnircam_dolphot.merged.final.fits'
 
 [parameters.apcorr]
@@ -52,7 +57,7 @@ apcorr_method = 'crds'
 use_brightest = false
 fwhm2rad = 2.5
 # this cannot be true if r_opt is in the steps - the code will stop with a warning
-use_filter_fwhm = false
+use_filter_fwhm = true
 # this can be a scalar or an array corresponding to bands
 ap_radius_arcsec = 0.2
 # these can be in pixels, or a string with r, like "2r" to be a muliple of the aperture radius

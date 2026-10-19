@@ -1,0 +1,35 @@
+[project]
+name = "jwst_aperture_photometry"
+version = "0.1.0"
+description = "Source finder and aperture photometry tool for JWST and HST imaging data"
+readme = "README.md"
+license = { file = 'LICENSE' }
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+requires-python ">=3.11"
+
+authors = [
+	{name = "Rebecca J. Houghton", email = astro.rhoughton@gmail.com},
+	{name = "Remy Indebetouw", email = remy@virginia.edu},
+]
+
+dependencies = [
+    "numpy",
+    "astropy",
+    "photutils",
+    "scipy",
+    "matplotlib",
+    "astroquery",
+]
+
+[build-system]
+requires = [
+    "setuptools == 82.0.1",
+    "wheel == 0.47.0",
+    "setuptools_scm == 10.0.5",
+]
+build-backend = "setuptools.build_meta"
