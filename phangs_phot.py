@@ -36,8 +36,8 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config_pahsub.toml'     # Photometry parameters
-local_file = 'config/local.toml'       # Paths to directories
+config_file = 'config/config.toml'     # Photometry parameters
+local_file = 'config/mpcdf.toml'       # Paths to directories
 
 # TODO make flux limits unit-aware
 lowfluxlim = 1e-5 # below this its a nondetection
