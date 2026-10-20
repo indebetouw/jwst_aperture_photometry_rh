@@ -36,8 +36,8 @@ from astroquery.svo_fps import SvoFps
 # Configs
 # ------------------------------------------------
 
-config_file = 'config/config.toml'     # Photometry parameters
-local_file = 'config/mpcdf.toml'       # Paths to directories
+config_file = 'config/va_test1.toml'     # Photometry parameters
+local_file = 'config/va_test_local.toml'       # Paths to directories
 
 # TODO make flux limits unit-aware
 lowfluxlim = 1e-5 # below this its a nondetection
@@ -89,7 +89,7 @@ def load_filter_data(csv_path=None):
     return fwhm, wave
 
 
-filter_fwhm_pix, filter_wave = load_filter_data()
+filter_fwhm_pix, filter_wave = load_filter_data(csv_path="src/data/filter_data.csv")
 
 
 # ------------------------------------------------
@@ -948,7 +948,11 @@ def compute_photometry(data,
             category=FITSFixedWarning,
         )
         wcs = WCS(header)
-    ra, dec = wcs.all_pix2world(phot_full["x_center"], phot_full["y_center"], 0)
+    # the return column name changes from photutils 2 to 3
+    if "x_center" in phot_full.colnames:
+        ra, dec = wcs.all_pix2world(phot_full["x_center"], phot_full["y_center"], 0)
+    else:
+        ra, dec = wcs.all_pix2world(phot_full["xcenter"], phot_full["ycenter"], 0)
     pixscale = wcs.proj_plane_pixel_scales()[0].to("arcsec")
     phot_full["ra"]  = np.round(ra ,8)
     phot_full["dec"] = np.round(dec,8)
@@ -1294,7 +1298,7 @@ def get_apcorr_params(crds_dir, band, inst, eefraction_value=0.8, apcorr_method=
 
     return radius, sky_in, sky_out, apcorr
 
-def get_psf_file(band):
+def get_psf_file(band,psf_dir):
     candidates = glob.glob(psf_dir + f"PSF*{band}*fits")
 
     if len(candidates) == 0:
@@ -2248,7 +2252,7 @@ def do_photometry(
             # Open the JWST data file 
             img, err, snr_map, coverage_mask, header = open_jwst(datafile)
             # get distance from the galaxy sample table (override with config file)
-            sample_tab = Table.read("phangs_sample_table_v1p6.ecsv")
+            sample_tab = Table.read("src/data/phangs_sample_table_v1p6.ecsv")
             dist_Mpc = sample_tab[sample_tab['name'] == gal]['dist'][0]
             if 'dist_Mpc' in conf['parameters']['bkg_subtract']:
                 dist_Mpc = conf['parameters']['bkg_subtract']['dist_Mpc']

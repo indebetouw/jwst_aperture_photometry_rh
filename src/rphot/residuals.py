@@ -15,8 +15,6 @@ from scipy.ndimage import rotate
 from .io import load_filter_data, get_psf_file
 from .units import im2flux, flux2im
 
-# cat_filetype, lowfluxlim
-
 filter_fwhm_pix, filter_wave = load_filter_data()
 
 # Take an image clip and return the residual after subtracting the PSFcores of sources as defined by params
@@ -131,7 +129,11 @@ def fit_and_subtract(infile, # input mosaic image
                 doregion=False,
                 rd0=[0,0], # center of region to fit in degrees
                 d=0.01, # size of region to fit in degrees
-                radius=None
+                radius=None,
+                # TODO make flux limits unit-aware
+                lowfluxlim = 1e-5, # below this its a nondetection           
+                psf_dir="./",
+                cat_filetype="ecsv"
                 ):
 
     from lmfit import minimize, Parameters, create_params
@@ -155,6 +157,7 @@ def fit_and_subtract(infile, # input mosaic image
     
     #---------------------------------------------
     # load input image
+    # TODO use load_jwst instead of manually opening the FITS file and handling extensions
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -166,7 +169,7 @@ def fit_and_subtract(infile, # input mosaic image
             message=r".*datfix.*",
             category=FITSFixedWarning,
         )
-        for whathdu in extensions_to_try:
+        for whathdu in ['SCI','CONTSUB','PRIMARY']:
             if whathdu in fits.open(infile):
                 break
         inhdu = fits.open(infile)[whathdu]
@@ -206,7 +209,7 @@ def fit_and_subtract(infile, # input mosaic image
     
     #---------------------------------------------
     # set up psfs - expects 4 x oversampled psf in the file
-    psffile = get_psf_file(band)
+    psffile = get_psf_file(band,psf_dir=psf_dir)
 
     psfdat=fits.getdata(psffile)
     #OVERSAMP=                    4 / Oversampling factor for FFTs in computation
