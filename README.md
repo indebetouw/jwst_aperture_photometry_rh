@@ -1,4 +1,4 @@
-# PHANGS-JWST Aperture Photometry
+# PHANGS compact source photometry
  
 A Python pipeline for performing aperture photometry on JWST NIRCam and MIRI imaging data from the [PHANGS-JWST survey](https://sites.google.com/view/phangs/home). The pipeline handles the full workflow from loading mosaics to producing calibrated photometric catalogs, including background subtraction, source detection, optimal aperture selection, and aperture corrections.
 
