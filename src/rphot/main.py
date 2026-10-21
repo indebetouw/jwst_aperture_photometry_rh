@@ -15,8 +15,8 @@ from rphot.residuals import residual, fit_and_subtract
 
 
 # Directories
-config_file = 'config/va_test1.toml'     # Photometry parameters
-local_file = 'config/va_test_local.toml'       # Paths to directories
+config_file = 'config/singleband.toml'     # Photometry parameters
+local_file = 'config/va.toml'       # Paths to directories
 
 config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname((os.path.abspath(__file__))))), config_file)
 local_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname((os.path.abspath(__file__))))), local_file)
@@ -286,9 +286,13 @@ def do_photometry(
 
             # Load the filename from the config
             if "phot_cat_filename" in conf['parameters']['photometry']:
-                cat_filename = conf['parameters']['photometry']['phot_cat_filename']
+                phot_cat_filename = conf['parameters']['photometry']['phot_cat_filename']
             else:
-                cat_filename = f"{gal}_{band}_phot_cat_r{r_opt:4.2f}." + cat_filetype
+                phot_cat_filename = f"{gal}_{band}_phot_cat_r{r_opt:4.2f}." + cat_filetype
+                if 'phot_cat_extrastring' in phot_params:
+                    if phot_params['phot_cat_extrastring'] is not None and len(phot_params['phot_cat_extrastring']) > 0:
+                        phot_cat_filename = f"{gal}_{band}_phot_cat_{phot_params['phot_cat_extrastring']}_r{r_opt:4.2f}." + cat_filetype
+
 
             # Perform photometry with circular apertures
             if 'aperture_photometry' in steps:
@@ -305,7 +309,7 @@ def do_photometry(
                     sources = sources,
                     apcorr_method = apcorr_method,
                     # TODO put out_dir in cat_filename 
-                    phot_cat_filename = cat_filename,
+                    phot_cat_filename = phot_cat_filename,
                     apcorr_params = conf['parameters']['apcorr'],
                     **conf['parameters']['photometry'],
                     **local,
@@ -317,7 +321,7 @@ def do_photometry(
                 catalogs[gal][band] = catalog
 
                 # ds9 region file for visualizing sources
-                ds9reg=open(local['out_dir']+'/'+'.'.join(cat_filename.split('.')[:-1])+".reg","w")
+                ds9reg=open(local['out_dir']+'/'+'.'.join(phot_cat_filename.split('.')[:-1])+".reg","w")
                 ds9reg.write("fk5\n")
                 r_opt_asec = r_opt * header['CDELT2'] * 3600.  # convert pixels to arcseconds
                 for src in catalog:
@@ -335,7 +339,7 @@ def do_photometry(
 
 
             else:
-                phot_cat_path = local['out_dir'] + "/" + cat_filename
+                phot_cat_path = local['out_dir'] + "/" + phot_cat_filename
                 if os.path.exists(phot_cat_path):
                     catalogs[gal][band] = QTable.read(phot_cat_path)
                     print(f"Loaded photometry catalog from {phot_cat_path}")
@@ -354,9 +358,9 @@ def do_photometry(
                     fittype=None
                 catalog = fit_and_subtract(
                     datafile,
+                    gal=gal,
                     band=band,
-                    srcfile=local['out_dir']+'/'+cat_filename, # source catalog to use for fitting 
-                    file_root=local['out_dir'] + f"/{gal}_{band}",
+                    srcfile=local['out_dir']+'/'+phot_cat_filename, # source catalog to use for fitting 
                     pixbinfactor=1.,
                     fittype=fittype, # "amp" or "amppos" or "ampwid" but here we want None to just create residual
                     doplot=True,
@@ -369,7 +373,8 @@ def do_photometry(
                     d  =conf['region_size'],
                     radius=r_opt,
                     psf_dir=local['psf_dir'],
-                    cat_filetype = conf['cat_filetype']
+                    cat_filetype = conf['cat_filetype'],
+                    local=local, config=conf
                 )
 
                 # Store (replace) the catalog in the catalogs dict
@@ -393,4 +398,4 @@ for gal in catalogs:
                                           keys_to_discard=['aperture_sum', 'aperture_sum_err', 'aperture_sum_abmag', 'aperture_sum_abmag_err', 'x_center', 'y_center',
                                                            'psffit_ra', 'psffit_dec'],
                                           common_keys=['id','ra','dec'])
-        combined_catalog.write(out_dir + f"/{gal}_combined." + cat_filetype, overwrite=True)
+        combined_catalog.write(local['out_dir'] + f"/{gal}_combined." + cat_filetype, overwrite=True)
