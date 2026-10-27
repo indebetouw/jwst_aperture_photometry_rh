@@ -3,7 +3,7 @@
 
 # steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr", "residual", "psffit"]
 steps = ["subtract_bkg", "aperture_photometry", "apcorr", "residual", "psffit"] 
-targets = ["ngc1672"]
+targets = ["ngc3351"]
 product = ""
 # NGC5068 has no PaA, and 657->658
 # bands = ["convolved_pah_f360m","F657","F187N","F200W","F300M","F335M","F360M","F770W","F1000W"]
@@ -53,8 +53,7 @@ sharphi = 1.0
 nsources = 100000
 # find_cat_filename = '' # override default of f"{gal}_jwst_{band}_find_cat." + cat_filetype
 # use the pah photometered catalog here to get the same brightest 36 sources - also have to re-force the conv_pah itself in "bands"
-# find_cat_filename = 'Phot_v5p4_ngc3351_IR4_class12human.csv'
-find_cat_filename = 'Phot_v5p4_src_335_ngc1672.csv'
+find_cat_filename = 'Phot_v5p4_src_335_ngc3351.csv'
 
 [parameters.apcorr]
 

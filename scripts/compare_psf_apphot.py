@@ -24,15 +24,23 @@ out_plot  = phot_dir / "ngc3351_postTAB_flux_compare.png"
 flux_col = "aperture_flux_mJy"
 flux_col2 = "aperture_flux_mJy"
 
-band = "F300M"
-band = "convolved_pah_f360m"
+band = "F335M"
+#band = "convolved_pah_f360m"
 
 phot_dir = Path("/Users/ri3e/cv/galaxies/phot/indep_bands/")
-cat1_path = phot_dir / f"ngc3351_{band}_phot_cat.ecsv"
-cat2_path = cat1_path # sometimes we want different catalogs
 out_plot  = phot_dir / f"ngc3351_app_psf_{band}_compare.png"
+cat1_path = phot_dir / f"ngc3351_{band}_phot_cat.ecsv"
+
+phot_dir = Path("/Users/ri3e/cv/galaxies/phot/from_hst/")
+out_plot  = phot_dir / f"ngc3351_app_psf_{band}_from_hst_compare.png"
+cat1_path = phot_dir / f"ngc3351_{band}_phot_cat_from_hst.ecsv"
+
+
+cat2_path = cat1_path # sometimes we want different catalogs
 flux_col = "aperture_flux"
 flux_col2 = "psffit_ampwid_flux" 
+
+
 
 cat1 = Table.read(cat1_path)
 cat2 = Table.read(cat2_path)
@@ -56,12 +64,13 @@ assert np.nanmax(dec_diff_arcsec) < 1.0, "Dec difference too large"
 f1 = np.asarray(cat1[flux_col], dtype=float)
 f2 = np.asarray(cat2[flux_col2], dtype=float)
 
+good=np.where((f1 > 1e-5) & (f2 > 1e-5))[0]
 pl.clf()
 pl.subplot(211)
-pl.plot(f1, f2/f1, "k.", ms=2)
+pl.plot(f1[good], (f2/f1)[good], "k.", ms=2)
 #ax.axhline(1.0, color='r', linestyle='--', lw=1)
 
-z=np.where(cat2['psffit_ampwid_wout']<1e-5)[0]
+z=np.where((cat2['psffit_ampwid_wout']<1e-5) & (f1 > 1e-5) & (f2 > 1e-5))[0]
 pl.plot(f1[z],(f2/f1)[z], "r.", ms=2)
 
 pl.xscale("log")
@@ -126,5 +135,6 @@ pl.ylabel("PSF-fit/aperture")
 
 pl.tight_layout()
 pl.savefig(out_plot)
+
 
 print(f"Saved plot: {out_plot}")

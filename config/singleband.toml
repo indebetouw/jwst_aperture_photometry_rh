@@ -4,8 +4,8 @@
 steps = ["subtract_bkg", "source_find", "aperture_photometry", "apcorr", "residual", "psffit"]
 targets = ["ngc3351"]
 product = ""
-#bands = ["F335M"]
-bands = ["convolved_pah_f360m"]
+bands = ["F335M"]
+# bands = ["convolved_pah_f360m"]
 version = ''
 ptype = [""]
 projects = [""]

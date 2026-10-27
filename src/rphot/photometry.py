@@ -216,7 +216,11 @@ def compute_photometry(data,
         phot_full['finder_centroid_fail'] = sources['reject']
     if 'id' in sources.colnames:
         phot_full['id'] = sources['id']
-
+    if 'ID_phangs' in sources.colnames:
+        sources['id'] = sources['ID_phangs']
+    if 'ID_source' in sources.colnames:
+        sources['id'] = sources['ID_source']
+    
     # Include ra, dec
     with warnings.catch_warnings():
         warnings.filterwarnings(

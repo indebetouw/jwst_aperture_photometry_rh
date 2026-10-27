@@ -16,6 +16,7 @@ from rphot.residuals import residual, fit_and_subtract
 
 # Directories
 config_file = 'config/singleband.toml'     # Photometry parameters
+config_file = 'config/config_hst_force.toml'     # Photometry parameters
 local_file = 'config/va.toml'       # Paths to directories
 
 config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname((os.path.abspath(__file__))))), config_file)
